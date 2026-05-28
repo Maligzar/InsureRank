@@ -1,0 +1,395 @@
+// This is the Prisma schema for InsureRank.
+// Run `npm run db:generate` after changes.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+enum Role {
+  SUPER_ADMIN
+  ORG_ADMIN
+  MANAGER
+  AGENT
+  VIEWER
+}
+
+enum LineOfBusiness {
+  LIFE
+  PNC
+  HEALTH
+  OTHER
+}
+
+enum SourceChannel {
+  REFERRAL
+  WEB_FORM
+  COLD_CALL
+  IMPORT
+  SOCIAL
+  OTHER
+}
+
+enum Temperature {
+  HOT
+  WARM
+  COLD
+}
+
+enum ActivityType {
+  CALL
+  SMS
+  EMAIL
+  MEETING
+  NOTE
+  TASK
+}
+
+enum CallDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum PolicyStatus {
+  ACTIVE
+  LAPSED
+  PENDING
+  CANCELLED
+}
+
+enum QuoteStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+  DECLINED
+  EXPIRED
+}
+
+enum AgentStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+// ─── Multi-tenant root ────────────────────────────────────────────────────────
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  plan      String   @default("free")
+  settings  Json     @default("{}")
+  timezone  String   @default("America/New_York")
+  logoUrl   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users          User[]
+  agents         Agent[]
+  contacts       Contact[]
+  pipelineStages PipelineStage[]
+  carriers       Carrier[]
+  auditLogs      AuditLog[]
+}
+
+// ─── Auth ─────────────────────────────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  orgId         String
+  email         String
+  passwordHash  String?
+  name          String
+  avatar        String?
+  emailVerified DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  agent        Agent?
+  sessions     Session[]
+  invites      Invite[]     @relation("invitedBy")
+
+  @@unique([orgId, email])
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  email     String
+  token     String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+}
+
+model EmailVerificationToken {
+  id        String   @id @default(cuid())
+  email     String
+  token     String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+}
+
+model Invite {
+  id          String    @id @default(cuid())
+  orgId       String
+  email       String
+  role        Role      @default(AGENT)
+  token       String    @unique
+  expiresAt   DateTime
+  acceptedAt  DateTime?
+  invitedById String
+  createdAt   DateTime  @default(now())
+
+  invitedBy User @relation("invitedBy", fields: [invitedById], references: [id])
+
+  @@index([orgId])
+}
+
+// ─── Agents ───────────────────────────────────────────────────────────────────
+
+model Agent {
+  id              String      @id @default(cuid())
+  orgId           String
+  userId          String      @unique
+  role            Role        @default(AGENT)
+  licenseNumber   String?
+  licenseState    String?
+  licenseExpiry   DateTime?
+  twilioNumber    String?
+  fcmToken        String?
+  apnsToken       String?
+  rankScore       Float       @default(0)
+  status          AgentStatus @default(ACTIVE)
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  contacts     Contact[]    @relation("assignedAgent")
+  activities   Activity[]
+  rankSnapshots RankSnapshot[] @relation("agentRankSnapshots")
+
+  @@index([orgId])
+  @@index([orgId, status])
+}
+
+// ─── Contacts & Leads ─────────────────────────────────────────────────────────
+
+model Contact {
+  id              String        @id @default(cuid())
+  orgId           String
+  firstName       String
+  lastName        String
+  email           String?
+  phone           String?
+  phoneE164       String?
+  dob             DateTime?
+  address         Json?
+  sourceChannel   SourceChannel @default(OTHER)
+  utmSource       String?
+  utmMedium       String?
+  utmCampaign     String?
+  utmContent      String?
+  utmTerm         String?
+  assignedAgentId String?
+  deletedAt       DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  organization  Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  assignedAgent Agent?       @relation("assignedAgent", fields: [assignedAgentId], references: [id])
+  leads         Lead[]
+  policies      Policy[]
+
+  @@index([orgId])
+  @@index([orgId, assignedAgentId])
+  @@index([phoneE164])
+}
+
+model Lead {
+  id              String         @id @default(cuid())
+  contactId       String
+  pipelineStageId String
+  lineOfBusiness  LineOfBusiness
+  rankScore       Float          @default(0)
+  temperature     Temperature    @default(WARM)
+  expectedRevenue Float?
+  closeDate       DateTime?
+  lostReason      String?
+  lastActivityAt  DateTime?
+  deletedAt       DateTime?
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  contact       Contact       @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  pipelineStage PipelineStage @relation(fields: [pipelineStageId], references: [id])
+  activities    Activity[]
+  quotes        Quote[]
+  rankSnapshots RankSnapshot[] @relation("leadRankSnapshots")
+
+  @@index([contactId])
+  @@index([pipelineStageId])
+  @@index([rankScore])
+  @@index([lastActivityAt])
+}
+
+// ─── Pipeline ─────────────────────────────────────────────────────────────────
+
+model PipelineStage {
+  id             String          @id @default(cuid())
+  orgId          String
+  name           String
+  position       Int
+  probability    Float           @default(0)
+  lineOfBusiness LineOfBusiness?
+  isDefault      Boolean         @default(false)
+  isClosed       Boolean         @default(false)
+  isWon          Boolean         @default(false)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  leads        Lead[]
+
+  @@index([orgId, position])
+}
+
+// ─── Activities ───────────────────────────────────────────────────────────────
+
+model Activity {
+  id                  String        @id @default(cuid())
+  orgId               String
+  leadId              String?
+  agentId             String
+  type                ActivityType
+  notes               String?
+  scheduledAt         DateTime?
+  completedAt         DateTime?
+  twilioCallSid       String?
+  twilioSmsSid        String?
+  callDurationSeconds Int?
+  callDirection       CallDirection?
+  callRecordingUrl    String?
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  lead  Lead?  @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  agent Agent  @relation(fields: [agentId], references: [id])
+
+  @@index([leadId, createdAt])
+  @@index([orgId, agentId])
+}
+
+// ─── Policies & Quotes ────────────────────────────────────────────────────────
+
+model Carrier {
+  id        String   @id @default(cuid())
+  orgId     String
+  name      String
+  logoUrl   String?
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  policies     Policy[]
+  quotes       Quote[]
+
+  @@index([orgId])
+}
+
+model Policy {
+  id             String         @id @default(cuid())
+  contactId      String
+  carrierId      String
+  agentId        String?
+  lineOfBusiness LineOfBusiness
+  policyNumber   String?
+  premium        Float
+  effectiveDate  DateTime
+  expiryDate     DateTime
+  status         PolicyStatus   @default(ACTIVE)
+  deletedAt      DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  contact Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  carrier Carrier @relation(fields: [carrierId], references: [id])
+
+  @@index([contactId])
+}
+
+model Quote {
+  id             String         @id @default(cuid())
+  leadId         String
+  carrierId      String
+  lineOfBusiness LineOfBusiness
+  premium        Float
+  deductible     Float?
+  coverage       Json?
+  expiryDate     DateTime?
+  status         QuoteStatus    @default(DRAFT)
+  sentAt         DateTime?
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  lead    Lead    @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  carrier Carrier @relation(fields: [carrierId], references: [id])
+
+  @@index([leadId])
+}
+
+// ─── Ranking ──────────────────────────────────────────────────────────────────
+
+model RankSnapshot {
+  id         String   @id @default(cuid())
+  leadId     String?
+  agentId    String?
+  score      Float
+  components Json
+  createdAt  DateTime @default(now())
+
+  lead  Lead?  @relation("leadRankSnapshots", fields: [leadId], references: [id], onDelete: Cascade)
+  agent Agent? @relation("agentRankSnapshots", fields: [agentId], references: [id], onDelete: Cascade)
+
+  @@index([leadId, createdAt])
+  @@index([agentId, createdAt])
+}
+
+// ─── Audit ────────────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  orgId      String
+  actorId    String?
+  action     String
+  entityType String
+  entityId   String
+  diff       Json?
+  createdAt  DateTime @default(now())
+
+  organization Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@index([orgId, createdAt])
+  @@index([entityType, entityId])
+}
