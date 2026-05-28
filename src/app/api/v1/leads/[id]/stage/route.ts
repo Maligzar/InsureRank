@@ -3,6 +3,8 @@ import { db } from '@/lib/db'
 import { requireSession } from '@/lib/api-auth'
 import { leadStageSchema } from '@/lib/validations'
 import { enqueueLeadRank } from '@/lib/queue'
+import { createAuditLog } from '@/lib/audit'
+import { sendPushToAgent } from '@/lib/fcm'
 
 type Ctx = { params: Promise<{ id: string }> }
 
@@ -13,6 +15,7 @@ export async function PATCH(req: Request, { params }: Ctx) {
 
     const lead = await db.lead.findFirst({
       where: { id, deletedAt: null, contact: { orgId: session.user.orgId, deletedAt: null } },
+      include: { contact: { select: { assignedAgentId: true } } },
     })
     if (!lead) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
@@ -36,6 +39,22 @@ export async function PATCH(req: Request, { params }: Ctx) {
     })
 
     enqueueLeadRank(id).catch(console.error)
+
+    createAuditLog(session.user.orgId, session.user.id, 'LEAD_STAGE_CHANGED', 'lead', id, {
+      from: lead.pipelineStageId,
+      to: parsed.data.pipelineStageId,
+      stageName: stage.name,
+    }).catch(() => {})
+
+    const agentId = lead.contact.assignedAgentId
+    if (agentId && stage.isClosed && stage.isWon) {
+      sendPushToAgent(agentId, {
+        title: 'Lead Won!',
+        body: `A lead has moved to ${stage.name}.`,
+        data: { type: 'LEAD_STAGE_CHANGED', leadId: id },
+      }).catch(() => {})
+    }
+
     return NextResponse.json(updated)
   } catch (err: unknown) {
     if (err instanceof Error && 'status' in err) {

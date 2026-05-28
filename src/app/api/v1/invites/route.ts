@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { requireRole } from '@/lib/api-auth'
+import { createAuditLog } from '@/lib/audit'
 import { Resend } from 'resend'
 import { randomBytes } from 'crypto'
 import { z } from 'zod'
@@ -45,6 +46,11 @@ export async function POST(req: Request) {
       subject: "You've been invited to InsureRank",
       html: `<p>You've been invited to join InsureRank. <a href="${acceptUrl}">Accept your invitation</a> (expires in 7 days).</p>`,
     })
+
+    createAuditLog(session.user.orgId, session.user.id, 'INVITE_SENT', 'invite', invite.id, {
+      email,
+      role,
+    }).catch(() => {})
 
     return NextResponse.json({ id: invite.id }, { status: 201 })
   } catch (err: unknown) {

@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { requireSession } from '@/lib/api-auth'
 import { contactSchema } from '@/lib/validations'
+import { createAuditLog } from '@/lib/audit'
+import { sendPushToAgent } from '@/lib/fcm'
 import { Prisma } from '@prisma/client'
 
 type Ctx = { params: Promise<{ id: string }> }
@@ -53,6 +55,7 @@ export async function PATCH(req: Request, { params }: Ctx) {
 
     const { convertToLead: _c, dob, address, ...rest } = parsed.data
 
+    const prevAgentId = existing.assignedAgentId
     const contact = await db.contact.update({
       where: { id },
       data: {
@@ -61,6 +64,26 @@ export async function PATCH(req: Request, { params }: Ctx) {
         address: address as Prisma.InputJsonValue | undefined,
       },
     })
+
+    const newAgentId = contact.assignedAgentId
+    const isReassignment = rest.assignedAgentId !== undefined && newAgentId !== prevAgentId
+    createAuditLog(
+      session.user.orgId,
+      session.user.id,
+      isReassignment ? 'CONTACT_ASSIGNED' : 'CONTACT_UPDATED',
+      'contact',
+      id,
+      isReassignment ? { from: prevAgentId, to: newAgentId } : undefined
+    ).catch(() => {})
+
+    if (isReassignment && newAgentId) {
+      sendPushToAgent(newAgentId, {
+        title: 'New Contact Assigned',
+        body: `${contact.firstName} ${contact.lastName} has been assigned to you.`,
+        data: { type: 'CONTACT_ASSIGNED', contactId: id },
+      }).catch(() => {})
+    }
+
     return NextResponse.json(contact)
   } catch (err: unknown) {
     return handleError(err)
@@ -75,6 +98,9 @@ export async function DELETE(_req: Request, { params }: Ctx) {
     if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
     await db.contact.update({ where: { id }, data: { deletedAt: new Date() } })
+    createAuditLog(session.user.orgId, session.user.id, 'CONTACT_DELETED', 'contact', id).catch(
+      () => {}
+    )
     return new NextResponse(null, { status: 204 })
   } catch (err: unknown) {
     return handleError(err)
