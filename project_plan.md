@@ -2,16 +2,18 @@
 
 ## Milestone 1 Goal
 
-Deliver a working, deployable insurance sales CRM core: user authentication, multi-tenant organization setup, contact/lead management with a kanban pipeline, and a basic lead rank score. At the end of M1 an agency can sign up, invite agents, import leads, move them through a sales funnel, and see each lead's rank score.
+Deliver a working, deployable insurance sales CRM core: email/password authentication, multi-tenant organization setup, contact/lead management (with line-of-business segmentation and full UTM attribution), a kanban pipeline, lead rank scoring, and Twilio-powered call + SMS from within the app. At the end of M1 an agency can sign up, invite agents, import leads, call or text prospects directly, move leads through a segmented sales funnel, and see each lead's rank score.
 
 ---
 
 ## Success Criteria
 
 - [ ] An organization admin can sign up, configure their agency, and invite team members
-- [ ] Agents can log in (email/password and Google OAuth)
-- [ ] Agents can create, update, and delete leads and contacts
+- [ ] Agents can log in with email + password
+- [ ] Agents can create, update, and delete leads and contacts with line-of-business (Life, P&C, Health) and full UTM source attribution
+- [ ] Agents can call or SMS a lead directly from the lead detail page; calls and texts are auto-logged as Activities
 - [ ] Leads can be moved through a configurable pipeline via a kanban board
+- [ ] Pipeline stages can optionally be filtered by line of business
 - [ ] Each lead displays a rank score (0–100) computed from engagement and pipeline signals
 - [ ] All data is isolated per organization (no cross-tenant leakage)
 - [ ] The application is deployed to production and passes all automated tests
@@ -30,9 +32,10 @@ Deliver a working, deployable insurance sales CRM core: user authentication, mul
 | Phase 5 | Pipeline kanban (API + UI) | Week 4–5 |
 | Phase 6 | Rank scoring engine | Week 5–6 |
 | Phase 7 | Core UI: dashboard, leads, contacts | Week 6–7 |
-| Phase 8 | Testing, QA, and production deployment | Week 7–8 |
+| Phase 8 | Twilio call + SMS integration | Week 7–8 |
+| Phase 9 | Testing, QA, and production deployment | Week 8–9.5 |
 
-Total estimated duration: **8 weeks**
+Total estimated duration: **9–10 weeks** (1.5 weeks added for Twilio integration)
 
 ---
 
@@ -81,6 +84,7 @@ Total estimated duration: **8 weeks**
   - `bullmq`
   - `resend`
   - `@aws-sdk/client-s3`
+  - `twilio`
   - `@sentry/nextjs`
   - `tailwindcss`, `shadcn-ui`
 
@@ -99,10 +103,12 @@ Total estimated duration: **8 weeks**
   - `Organization` — multi-tenant root, settings (JSON), plan
   - `User` — email, hashed password, name, avatar, emailVerified
   - `Agent` — orgId, userId, role (enum), licenseNumber, licenseState, licenseExpiry, status
-  - `Contact` — orgId, firstName, lastName, email, phone, dob, address (JSON), sourceType, assignedAgentId
-  - `Lead` — contactId, pipelineStageId, rankScore, temperature (HOT/WARM/COLD), expectedRevenue, closeDate, lostReason, lastActivityAt
+  - `Contact` — orgId, firstName, lastName, email, phone, dob, address (JSON), sourceChannel (enum), utmSource, utmMedium, utmCampaign, utmContent, utmTerm, assignedAgentId
+  - `Lead` — contactId, pipelineStageId, lineOfBusiness (LIFE | PNC | HEALTH | OTHER), rankScore, temperature (HOT/WARM/COLD), expectedRevenue, closeDate, lostReason, lastActivityAt
+  - `LineOfBusiness` enum: `LIFE`, `PNC`, `HEALTH`, `OTHER`
+  - `SourceChannel` enum: `REFERRAL`, `WEB_FORM`, `COLD_CALL`, `IMPORT`, `SOCIAL`, `OTHER`
   - `PipelineStage` — orgId, name, position, probability, isDefault, isClosed, isWon
-  - `Activity` — orgId, entityType, entityId, agentId, type (enum), notes, scheduledAt, completedAt
+  - `Activity` — orgId, entityType, entityId, agentId, type (CALL | SMS | EMAIL | MEETING | NOTE | TASK), notes, scheduledAt, completedAt, twilioCallSid, twilioSmsSid, callDurationSeconds, callDirection, callRecordingUrl
   - `RankSnapshot` — entityType, entityId, score, components (JSON), createdAt
   - `AuditLog` — orgId, actorId, action, entityType, entityId, diff (JSON), createdAt
 
@@ -116,7 +122,7 @@ Total estimated duration: **8 weeks**
   - 1 demo organization
   - 1 admin + 2 agent users
   - Default pipeline stages (New Lead → Contacted → Quoted → Pending Approval → Bound → Lost)
-  - 20 sample contacts/leads distributed across stages
+  - 20 sample contacts/leads distributed across stages, each with a lineOfBusiness and sourceChannel assigned
 
 #### 2.4 Prisma Client Setup
 - [ ] Create `src/lib/db.ts` with singleton Prisma client (handles connection pooling in serverless)
@@ -125,7 +131,7 @@ Total estimated duration: **8 weeks**
 
 #### 2.5 Validation Schemas (Zod)
 - [ ] Write Zod schemas matching every Prisma model for API input validation:
-  - `contactSchema`, `leadSchema`, `pipelineStageSchema`, `activitySchema`
+  - `contactSchema` (includes UTM fields), `leadSchema` (includes `lineOfBusiness`), `pipelineStageSchema`, `activitySchema`
   - Shared: `paginationSchema`, `sortSchema`
 
 **Deliverable:** `prisma migrate deploy` succeeds; `prisma db seed` populates a working development database.
@@ -140,10 +146,9 @@ Total estimated duration: **8 weeks**
 
 #### 3.1 NextAuth v5 Configuration
 - [ ] Create `src/lib/auth.ts` with NextAuth config:
-  - `CredentialsProvider` (email + bcrypt password)
-  - `GoogleProvider` (OAuth)
+  - `CredentialsProvider` (email + bcrypt password) — the only provider in M1
   - Custom session callback: embed `userId`, `orgId`, `role`, `agentId` into JWT
-  - Custom `signIn` callback: provision org and agent record on first OAuth login
+  - OAuth providers (Google, Microsoft) are deferred to M2
 
 #### 3.2 Middleware
 - [ ] Create `middleware.ts` at project root:
@@ -175,7 +180,7 @@ Total estimated duration: **8 weeks**
 - [ ] `POST /api/v1/auth/reset-password` — validate token, update bcrypt hash
 
 #### 3.7 Login / Signup Pages
-- [ ] `/login` page: email+password form + Google OAuth button
+- [ ] `/login` page: email + password form only (no OAuth buttons in M1)
 - [ ] `/signup` page: triggers registration flow
 - [ ] Forgot / reset password pages
 
@@ -190,15 +195,15 @@ Total estimated duration: **8 weeks**
 ### Tasks
 
 #### 4.1 Contacts API
-- [ ] `GET /api/v1/contacts` — paginated list; filter by `assignedAgentId`, `search` (name/email/phone)
-- [ ] `POST /api/v1/contacts` — create; auto-create Lead if `convertToLead: true`
+- [ ] `GET /api/v1/contacts` — paginated list; filter by `assignedAgentId`, `sourceChannel`, `search` (name/email/phone)
+- [ ] `POST /api/v1/contacts` — create with `sourceChannel` + UTM fields; auto-create Lead if `convertToLead: true`
 - [ ] `GET /api/v1/contacts/:id`
 - [ ] `PATCH /api/v1/contacts/:id`
 - [ ] `DELETE /api/v1/contacts/:id` — soft delete (set `deletedAt`)
 - [ ] All endpoints validate input with Zod and scope queries to `orgId`
 
 #### 4.2 Leads API
-- [ ] `GET /api/v1/leads` — paginated list; filters: `stageId`, `assignedAgentId`, `temperature`, `search`, `dateRange`; sort by `rankScore`, `lastActivityAt`, `expectedRevenue`
+- [ ] `GET /api/v1/leads` — paginated list; filters: `stageId`, `assignedAgentId`, `temperature`, `lineOfBusiness`, `sourceChannel`, `search`, `dateRange`; sort by `rankScore`, `lastActivityAt`, `expectedRevenue`
 - [ ] `POST /api/v1/leads`
 - [ ] `GET /api/v1/leads/:id` — includes contact, stage, recent activities, rank score
 - [ ] `PATCH /api/v1/leads/:id` — triggers rank score re-computation when relevant fields change
@@ -207,7 +212,7 @@ Total estimated duration: **8 weeks**
 
 #### 4.3 Activities API
 - [ ] `GET /api/v1/leads/:id/activities` — chronological list with pagination
-- [ ] `POST /api/v1/leads/:id/activities` — log call, email, meeting, note, task (with `scheduledAt` for tasks)
+- [ ] `POST /api/v1/leads/:id/activities` — manually log email, meeting, note, or task (with `scheduledAt` for tasks); CALL and SMS are auto-created by Twilio webhooks
 - [ ] `PATCH /api/v1/activities/:id` — mark task complete, edit notes
 - [ ] `DELETE /api/v1/activities/:id`
 
@@ -237,7 +242,7 @@ Total estimated duration: **8 weeks**
 - [ ] `PATCH /api/v1/pipeline/stages/reorder` — accept ordered array of IDs, update positions atomically
 
 #### 5.2 Pipeline Board API
-- [ ] `GET /api/v1/pipeline/board` — returns all stages with their leads (summarized), counts, and total expected revenue per stage; supports `assignedAgentId` filter
+- [ ] `GET /api/v1/pipeline/board` — returns all stages with their leads (summarized), counts, and total expected revenue per stage; supports `assignedAgentId` and `lineOfBusiness` filters
 
 #### 5.3 Kanban Board UI
 - [ ] Implement draggable kanban using `@dnd-kit/core` + `@dnd-kit/sortable`
@@ -255,7 +260,7 @@ Total estimated duration: **8 weeks**
 - [ ] Add / archive stages
 
 #### 5.5 Filters & Views
-- [ ] Filter bar above board: filter by assigned agent, temperature, date range
+- [ ] Filter bar above board: filter by assigned agent, line of business, temperature, date range
 - [ ] Toggle between Kanban and Table views (table reuses lead list from Phase 7)
 
 **Deliverable:** Agents can drag leads between stages on the kanban board; changes persist and are reflected immediately.
@@ -326,20 +331,20 @@ Total estimated duration: **8 weeks**
 - [ ] Recent activity feed: last 10 activities across the org
 
 #### 7.3 Leads List Page (`/dashboard/leads`)
-- [ ] Data table with columns: Contact, Rank Score, Stage, Temperature, Assigned Agent, Expected Revenue, Last Activity, Close Date
+- [ ] Data table with columns: Contact, LOB, Rank Score, Stage, Temperature, Assigned Agent, Expected Revenue, Last Activity, Close Date
 - [ ] Sortable columns, server-side pagination
-- [ ] Filter panel: stage, agent, temperature, date range
+- [ ] Filter panel: stage, agent, line of business, source channel, temperature, date range
 - [ ] Bulk action toolbar (select all → assign / move stage)
 - [ ] "New Lead" button → slide-over form
 - [ ] CSV import button → file picker + preview + import
 
 #### 7.4 Lead Detail Page (`/dashboard/leads/:id`)
-- [ ] Contact information card (editable inline)
+- [ ] Contact information card (editable inline) — includes source channel and UTM attribution (read-only display)
 - [ ] Pipeline stage selector (horizontal stage rail)
 - [ ] Rank score panel: badge + component breakdown + sparkline
-- [ ] Activity timeline (chronological, newest first)
-- [ ] Log activity form: call, email, meeting, note, task
-- [ ] Sidebar: assigned agent, temperature selector, expected revenue, close date, tags
+- [ ] Activity timeline (chronological, newest first) — call entries show duration, direction, and recording playback link
+- [ ] Log activity form: email, meeting, note, task (calls and SMS use Twilio buttons, not this form)
+- [ ] Sidebar: assigned agent, line of business badge, temperature selector, expected revenue, close date, tags
 
 #### 7.5 Contacts List Page (`/dashboard/contacts`)
 - [ ] Table: name, email, phone, assigned agent, open leads count, created date
@@ -362,48 +367,89 @@ Total estimated duration: **8 weeks**
 
 ---
 
-## Phase 8 — Testing, QA & Production Deployment
+## Phase 8 — Twilio Call + SMS Integration
+
+**Goal:** Agents can call and text leads from within the app; all communication is automatically logged as Activities.
+
+### Tasks
+
+#### 8.1 Twilio Account Setup
+- [ ] Provision Twilio project; purchase a platform default outbound number
+- [ ] Add `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` to env
+- [ ] Configure Twilio webhook URLs pointing to production (and ngrok for local dev)
+
+#### 8.2 Outbound Call Flow
+- [ ] `POST /api/v1/leads/:id/call` — creates a Twilio outbound call from the agent's browser to the lead's phone number using Twilio Client JS (browser-based softphone)
+- [ ] Return TwiML connecting the browser call to the lead's number
+- [ ] `POST /api/v1/webhooks/twilio/status` — Twilio posts call status updates; on `completed`, create an `Activity` record (type: CALL) with duration, direction, recording URL
+
+#### 8.3 Outbound SMS Flow
+- [ ] `POST /api/v1/leads/:id/sms` — send an SMS via Twilio REST API; create `Activity` record immediately
+- [ ] `POST /api/v1/webhooks/twilio/sms` — handle inbound SMS replies; match to lead by phone number, create Activity (type: SMS, direction: INBOUND), update `lastActivityAt`, enqueue rank score job
+
+#### 8.4 Security for Twilio Webhooks
+- [ ] Validate `X-Twilio-Signature` header on all webhook endpoints using `twilio.validateRequest()` — reject unsigned requests with 403
+
+#### 8.5 Call UI in Lead Detail
+- [ ] "Call" button on lead detail page — initiates browser call via Twilio Client JS SDK
+- [ ] Active call panel: contact name, timer, mute/hang-up controls
+- [ ] "SMS" button — opens inline compose box; character count; send button
+
+#### 8.6 Twilio Number per Agent (Optional M1 stretch)
+- [ ] Allow agents to have a dedicated Twilio number (stored on Agent record) for outbound caller ID; fall back to platform default if not set
+
+**Deliverable:** Agents can call and text a lead with one click; every call and SMS appears automatically in the lead's activity timeline with duration and direction.
+
+---
+
+## Phase 9 — Testing, QA & Production Deployment
 
 **Goal:** Confidence that M1 is stable, performant, and secure before announcing to first users.
 
 ### Tasks
 
-#### 8.1 Unit & Integration Tests
+#### 9.1 Unit & Integration Tests
 - [ ] Achieve ≥ 80% line coverage on:
   - All API route handlers (mocked Prisma)
   - `lead-scorer.ts` (all weight components)
   - Auth utilities (`requireSession`, `requireRole`, `scopeToOrg`)
-  - Zod validation schemas
+  - Zod validation schemas (including LOB and UTM fields)
+  - Twilio webhook handlers (mock `twilio.validateRequest`)
 - [ ] Integration tests for critical flows using Prisma test client against a test database
 
-#### 8.2 E2E Tests (Playwright)
+#### 9.2 E2E Tests (Playwright)
 - [ ] Sign up new organization → onboarding wizard → land on dashboard
-- [ ] Create contact → convert to lead → move through pipeline stages
+- [ ] Create contact with LOB + UTM attribution → convert to lead → move through pipeline stages
+- [ ] Filter pipeline kanban by line of business
 - [ ] Log activity → verify rank score updates
 - [ ] Invite agent → agent accepts → agent logs in → sees only own leads
-- [ ] CSV import → verify leads appear in pipeline
+- [ ] CSV import → verify leads appear in pipeline with correct LOB and source channel
+- [ ] Simulate Twilio call status webhook → verify CALL Activity auto-created on lead
+- [ ] Simulate Twilio inbound SMS webhook → verify SMS Activity created and `lastActivityAt` updated
 
-#### 8.3 Security Audit
+#### 9.3 Security Audit
 - [ ] Verify all mutations require valid session (run tests with no session header)
 - [ ] Verify org isolation: agent from Org A cannot access Org B data (cross-org request tests)
 - [ ] Check for mass-assignment: API only accepts whitelisted fields per Zod schema
+- [ ] Verify Twilio webhook signature validation rejects unsigned requests
 - [ ] Review Content-Security-Policy headers in production
 
-#### 8.4 Performance Baseline
+#### 9.4 Performance Baseline
 - [ ] Run Lighthouse CI against `/dashboard`, `/dashboard/leads`, `/dashboard/pipeline`
 - [ ] Target: LCP < 2.5 s, TBT < 200 ms on desktop; LCP < 4 s on mobile
 - [ ] Add missing DB indexes if query explain plans show sequential scans
 
-#### 8.5 Production Deployment
+#### 9.5 Production Deployment
 - [ ] Run `prisma migrate deploy` against production DB
 - [ ] Run `prisma db seed` for demo org data (optional — only if onboarding demo mode desired)
-- [ ] Verify all environment variables are set in Vercel and Railway
-- [ ] Smoke test production: register, log in, create lead, move through pipeline
+- [ ] Verify all environment variables are set in Vercel and Railway (including Twilio vars)
+- [ ] Configure Twilio webhook URLs to point at production domain
+- [ ] Smoke test production: register, log in, create lead with LOB, move through pipeline, place a test call
 - [ ] Configure Sentry alerts for error rate > 1% and p95 latency > 3 s
 - [ ] Set up Upstash Redis production instance with persistence enabled
 
-#### 8.6 Documentation
-- [ ] Update `README.md` with: local dev setup, env vars, seed instructions, deploy instructions
+#### 9.6 Documentation
+- [ ] Update `README.md` with: local dev setup, env vars, ngrok Twilio tunnel setup, seed instructions, deploy instructions
 - [ ] Write `CLAUDE.md` with: project conventions, key file locations, test commands, architecture summary (for AI-assisted development sessions)
 - [ ] Postman/Bruno collection exported for all v1 API endpoints
 
@@ -431,13 +477,17 @@ An item is done when:
 | DB schema changes after data exists in prod | Medium | High | All schema changes via Prisma migrations; never edit prod directly |
 | Drag-and-drop library accessibility issues | Medium | Low | Use `@dnd-kit` which has keyboard support; add ARIA labels |
 | Railway/Vercel cold starts impacting p95 | Low | Medium | Keep API routes lightweight; warm critical routes with health check pings |
+| Twilio webhook delivery failures | Low | Medium | Implement webhook retry queue in BullMQ; log all raw Twilio payloads for replay |
+| Phone number matching for inbound SMS | Medium | Medium | Normalize all phone numbers to E.164 on save; query by normalized number in webhook handler |
 
 ---
 
-## Open Questions (to resolve before or during M1)
+## Resolved Decisions
 
-1. **Multi-line of business:** Does M1 need to distinguish between Life, P&C, Health policy types, or is that M2?
-2. **Lead source tracking:** Should M1 capture UTM/referral source for imported and web-form leads?
-3. **SSO requirement:** Is Google OAuth sufficient for M1, or is Microsoft/Azure AD required by initial customers?
-4. **Phone / SMS integration:** Out of scope for M1, or should Twilio click-to-call be included?
-5. **Data residency:** Any requirement to keep PII in a specific AWS region (compliance)?
+| Decision | Resolution |
+|---|---|
+| Lines of business | **In M1.** Support Life, P&C, Health, and Other. `lineOfBusiness` is a required enum on Lead and Policy. |
+| Lead source / attribution | **Full UTM in M1.** Contact stores `sourceChannel` enum + `utmSource`, `utmMedium`, `utmCampaign`, `utmContent`, `utmTerm`. |
+| Authentication providers | **Email + password only for M1.** Google and Microsoft OAuth deferred to M2. |
+| Phone / SMS integration | **Twilio Call + SMS in M1** — full browser-based calling and SMS with auto-logged Activities. Timeline extended by 1.5 weeks. |
+| Data residency / compliance | **No special requirements.** Standard AWS `us-east-1`; HTTPS + AES-256 encryption at rest is sufficient. |

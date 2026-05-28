@@ -17,6 +17,8 @@ InsureRank is an insurance sales CRM platform built for agencies, brokers, and i
 | **Pipeline Stage** | A configurable step in the sales funnel (e.g. New → Quoted → Pending → Bound) |
 | **Agent** | A licensed insurance producer who owns leads and policies |
 | **Carrier** | An insurance company whose products are sold through the platform |
+| **Line of Business (LOB)** | The insurance category: `LIFE`, `PNC` (Property & Casualty), `HEALTH`, or `OTHER` |
+| **Lead Source** | How a contact was acquired: channel (Referral, Web Form, etc.) plus full UTM attribution |
 | **Rank Score** | A composite algorithmic score (0–100) reflecting a lead's or agent's standing |
 
 ---
@@ -58,10 +60,11 @@ InsureRank is an insurance sales CRM platform built for agencies, brokers, and i
 | ORM | Prisma | Type-safe DB access, migration tooling |
 | Database | PostgreSQL 15 | Relational integrity for financial/policy data |
 | Cache / sessions | Redis (Upstash) | Fast session store, rate limiting, job queue |
-| Auth | NextAuth.js v5 | Role-based, supports SSO (Google, Microsoft) |
+| Auth | NextAuth.js v5 | Email + password (M1); OAuth added in M2 |
 | Background jobs | BullMQ (Redis-backed) | Reliable async processing, retries |
 | File storage | AWS S3 | Policy documents, ID uploads |
 | Email | Resend | Transactional email (quotes, notifications) |
+| Voice + SMS | Twilio | Click-to-call, outbound SMS, activity auto-logging |
 | Deployment | Vercel (frontend) + Railway/Render (workers) | Zero-downtime deploys, preview environments |
 | CI/CD | GitHub Actions | Lint, test, type-check, deploy |
 | Monitoring | Sentry + Vercel Analytics | Error tracking + performance |
@@ -91,31 +94,48 @@ Organization ──< Agent >── TeamMembership ──> Team
 
 ```sql
 -- Multi-tenant root
-Organization { id, name, slug, plan, settings }
+Organization { id, name, slug, plan, settings, timezone }
 
 -- Users / agents
-Agent { id, orgId, userId, licenseNumber, licenseState, licenseExpiry, rank, status }
+Agent { id, orgId, userId, role, licenseNumber, licenseState, licenseExpiry, twilioNumber, rank, status }
 
 -- Contact (unified person record)
-Contact { id, orgId, firstName, lastName, email, phone, dob, address, sourceType, sourceId, assignedAgentId, createdAt }
+Contact {
+  id, orgId, firstName, lastName, email, phone, dob, address (JSON),
+  -- Lead source attribution
+  sourceChannel (REFERRAL | WEB_FORM | COLD_CALL | IMPORT | SOCIAL | OTHER),
+  utmSource, utmMedium, utmCampaign, utmContent, utmTerm,
+  assignedAgentId, createdAt
+}
 
 -- Lead (extends Contact with sales state)
-Lead { id, contactId, pipelineStageId, rankScore, temperature, expectedRevenue, closeDate, lostReason, lastActivityAt }
+Lead {
+  id, contactId, pipelineStageId,
+  lineOfBusiness (LIFE | PNC | HEALTH | OTHER),   -- required
+  rankScore, temperature (HOT | WARM | COLD),
+  expectedRevenue, closeDate, lostReason, lastActivityAt
+}
 
 -- Policy
-Policy { id, contactId, carrierId, productId, agentId, policyNumber, premium, effectiveDate, expiryDate, status }
+Policy { id, contactId, carrierId, productId, agentId, lineOfBusiness, policyNumber, premium, effectiveDate, expiryDate, status }
 
 -- Quote
-Quote { id, leadId, carrierId, productId, premium, deductible, coverage, expiryDate, status, sentAt }
+Quote { id, leadId, carrierId, productId, lineOfBusiness, premium, deductible, coverage, expiryDate, status, sentAt }
 
--- Pipeline
-PipelineStage { id, orgId, name, position, probability, isDefault, isClosed, isWon }
+-- Pipeline (stages can be scoped to a lineOfBusiness or apply to all)
+PipelineStage { id, orgId, name, position, probability, lineOfBusiness (nullable), isDefault, isClosed, isWon }
 
--- Activity log
-Activity { id, orgId, entityType, entityId, agentId, type, notes, scheduledAt, completedAt }
+-- Activity log (CALL and SMS types backed by Twilio)
+Activity {
+  id, orgId, entityType, entityId, agentId,
+  type (CALL | SMS | EMAIL | MEETING | NOTE | TASK),
+  notes, scheduledAt, completedAt,
+  -- Twilio metadata (populated for CALL / SMS types)
+  twilioCallSid, twilioSmsSid, callDurationSeconds, callDirection, callRecordingUrl
+}
 
 -- Rank snapshot (time-series for analytics)
-RankSnapshot { id, entityType, entityId, score, components, createdAt }
+RankSnapshot { id, entityType, entityId, score, components (JSON), createdAt }
 ```
 
 ---
@@ -124,10 +144,12 @@ RankSnapshot { id, entityType, entityId, score, components, createdAt }
 
 ### Auth Flow
 
-1. User authenticates via NextAuth (credential or OAuth — Google/Microsoft)
-2. JWT session contains `{ userId, orgId, role, permissions[] }`
+1. User authenticates via NextAuth `CredentialsProvider` (email + bcrypt password) — M1 only
+2. JWT session contains `{ userId, orgId, role, agentId }`
 3. Every API route validates session and enforces row-level org isolation
 4. Middleware applies role checks before route handlers execute
+
+OAuth providers (Google, Microsoft) are planned for M2.
 
 ### Roles
 
@@ -191,6 +213,13 @@ DELETE /api/v1/leads/:id
 
 GET    /api/v1/leads/:id/activities
 POST   /api/v1/leads/:id/activities
+
+POST   /api/v1/leads/:id/call            # Initiate Twilio outbound call
+POST   /api/v1/leads/:id/sms             # Send Twilio SMS
+
+GET    /api/v1/webhooks/twilio/voice     # Twilio TwiML callback
+POST   /api/v1/webhooks/twilio/status    # Call status + recording webhook
+POST   /api/v1/webhooks/twilio/sms       # Inbound SMS webhook
 
 GET    /api/v1/leads/:id/quotes
 POST   /api/v1/leads/:id/quotes
@@ -304,10 +333,11 @@ DIRECT_URL                  # Prisma migrations bypass pooler
 REDIS_URL
 NEXTAUTH_SECRET
 NEXTAUTH_URL
-GOOGLE_CLIENT_ID / SECRET
-AWS_ACCESS_KEY_ID / SECRET
-AWS_S3_BUCKET
+AWS_ACCESS_KEY_ID / SECRET / AWS_S3_BUCKET / AWS_REGION
 RESEND_API_KEY
+TWILIO_ACCOUNT_SID
+TWILIO_AUTH_TOKEN
+TWILIO_PHONE_NUMBER         # Platform default outbound number
 SENTRY_DSN
 ```
 
@@ -342,8 +372,8 @@ SENTRY_DSN
 
 | Milestone | Focus |
 |---|---|
-| M1 | Foundation: auth, data models, lead CRUD, pipeline kanban, basic rank score |
-| M2 | Policy & quote management, carrier integrations, document uploads |
+| M1 | Foundation: auth (email/password), data models with LOB + UTM attribution, lead CRUD, pipeline kanban, rank scoring, Twilio call + SMS |
+| M2 | Policy & quote management, carrier integrations, document uploads, Google/Microsoft OAuth |
 | M3 | Analytics dashboard, leaderboard, agent performance views, email notifications |
 | M4 | Automated workflows, AI-assisted follow-up suggestions, mobile web polish |
 | M5 | Public API, webhooks, marketplace integrations (Salesforce, HubSpot sync) |
