@@ -1,0 +1,5 @@
+app_identifier "com.insurerank.app"
+apple_id ENV["APPLE_ID"]
+
+itc_team_name "InsureRank"
+team_name "InsureRank"

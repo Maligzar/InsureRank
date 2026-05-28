@@ -1,4 +1,11 @@
 import { withSentryConfig } from '@sentry/nextjs'
+import withSerwistInit from '@serwist/next'
+
+const withSerwist = withSerwistInit({
+  swSrc: 'src/app/sw.ts',
+  swDest: 'public/sw.js',
+  disable: process.env.DISABLE_SW === 'true',
+})
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -17,7 +24,7 @@ const nextConfig = {
   },
 }
 
-export default withSentryConfig(nextConfig, {
+export default withSentryConfig(withSerwist(nextConfig), {
   org: process.env.SENTRY_ORG,
   project: process.env.SENTRY_PROJECT,
   silent: !process.env.CI,
