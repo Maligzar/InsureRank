@@ -28,25 +28,31 @@ InsureRank is an insurance sales CRM platform built for agencies, brokers, and i
 ### High-Level Diagram
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                           Client Layer                              │
-│  Mobile PWA (primary) — installable, offline-capable, push-enabled │
-│  Desktop browser (secondary)                                        │
-└───────────────────────────┬─────────────────────────────────────────┘
-                            │ HTTPS / WebRTC (Twilio)
-              ┌─────────────▼──────────────────────────────┐
-              │          Google Cloud Run                   │
-              │  ┌─────────────────┐  ┌──────────────────┐ │
-              │  │  Next.js App    │  │  BullMQ Workers  │ │
-              │  │  (SSR + API)    │  │  (rank, notify)  │ │
-              │  └────────┬────────┘  └────────┬─────────┘ │
-              └───────────┼────────────────────┼────────────┘
-                          │ VPC (private)       │
-        ┌─────────────────┼─────────────────────┼──────────────────┐
-        │         Google Cloud — Data Layer      │                  │
-        │  Cloud SQL       │         Memorystore │  Cloud Storage   │
-        │  (PostgreSQL 15) │         (Redis)     │  (GCS bucket)    │
-        └──────────────────┴─────────────────────┴──────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                           Client Layer                               │
+│                                                                      │
+│  iOS native app (App Store)     Android / desktop PWA                │
+│  ┌──────────────────────────┐   ┌──────────────────────────────────┐ │
+│  │ Capacitor shell          │   │ Next.js PWA in browser           │ │
+│  │ ├ Twilio Voice + CallKit │   │ ├ Twilio Client JS (WebRTC)      │ │
+│  │ ├ APNs push              │   │ ├ FCM push                       │ │
+│  │ └ Face ID / Keychain     │   │ └ Service worker (offline)       │ │
+│  └──────────────────────────┘   └──────────────────────────────────┘ │
+└─────────────────────────┬────────────────────────────────────────────┘
+                          │ HTTPS
+              ┌───────────▼───────────────────────────────┐
+              │          Google Cloud Run                  │
+              │  ┌────────────────────┐  ┌─────────────┐  │
+              │  │  Next.js App       │  │ BullMQ      │  │
+              │  │  (SSR + API)       │  │ Workers     │  │
+              │  └──────────┬─────────┘  └──────┬──────┘  │
+              └─────────────┼────────────────────┼─────────┘
+                            │ VPC (private)       │
+        ┌───────────────────┼─────────────────────┼────────────────┐
+        │       Google Cloud — Data Layer          │                │
+        │  Cloud SQL       │     Memorystore       │  Cloud Storage │
+        │  (PostgreSQL 15) │     (Redis)           │  (GCS)        │
+        └──────────────────┴───────────────────────┴────────────────┘
 ```
 
 ### Technology Stack
@@ -66,11 +72,15 @@ InsureRank is an insurance sales CRM platform built for agencies, brokers, and i
 | File storage | Google Cloud Storage (GCS) | Policy documents, ID uploads |
 | Email | Resend | Transactional email (quotes, notifications) |
 | Push notifications | Firebase Cloud Messaging (FCM) | Native-quality push to PWA on Android + iOS |
-| Voice + SMS | Twilio | Browser-based calling (WebRTC), outbound SMS, activity auto-logging |
+| Voice + SMS (Android/web) | Twilio Client JS | Browser-based WebRTC calling, outbound SMS |
+| Voice + SMS (iOS native) | Twilio Programmable Voice iOS SDK | CallKit integration — calls persist when app is backgrounded |
+| iOS native wrapper | Capacitor | Wraps the web app in a native iOS shell for App Store distribution |
+| iOS push | Apple Push Notification service (APNs) | Native push on all iOS 16+ devices via Capacitor plugin |
+| iOS auth | Capacitor Biometric Auth plugin | Face ID / Touch ID with Keychain session storage |
 | Deployment | Google Cloud Run | Containerised Next.js app + workers; auto-scales to zero |
 | Container registry | Google Artifact Registry | Docker image storage |
 | Secrets | Google Secret Manager | Centralised secret storage; injected into Cloud Run at runtime |
-| CI/CD | GitHub Actions | Lint, test, type-check → build Docker image → deploy to Cloud Run |
+| CI/CD | GitHub Actions + Fastlane | Web: build Docker → Cloud Run; iOS: Xcode archive → TestFlight |
 | Monitoring | Google Cloud Monitoring + Sentry | Infrastructure metrics + application error tracking |
 | Testing | Vitest + Playwright (mobile viewport) | Unit/integration + E2E with mobile-first test runs |
 
@@ -271,6 +281,23 @@ Because agents primarily use InsureRank on their phones, every UI decision prior
 
 Desktop retains a sidebar layout; the responsive breakpoint between mobile and desktop is 768 px.
 
+### iPhone / iOS Constraints and the App Store Decision
+
+The web PWA works correctly on iPhone for all features **except active phone calls**. iOS aggressively suspends web pages — including their WebRTC audio streams — when the app is sent to the background (home button, app switcher, or screen lock). For an insurance agent on a call who switches to look up a policy number, the call drops immediately.
+
+| Feature | PWA on iOS Safari | App Store (Capacitor) |
+|---|---|---|
+| Lead / contact management | Works | Works |
+| Pipeline kanban | Works | Works |
+| SMS | Works | Works |
+| Offline caching | Works (iOS 16+) | Works |
+| Push notifications | Works (iOS 16.4+, add-to-home-screen required) | Works (APNs, all iOS 16+, standard install) |
+| Install experience | Manual: Share → Add to Home Screen; no system prompt | Standard App Store install |
+| Outbound calls | **Drops if app backgrounded or screen locks** | Persists via CallKit — shows native call UI |
+| Face ID login | Not available | Supported via Keychain + Biometric Auth plugin |
+
+**Conclusion**: The App Store distribution (via Capacitor) is required for agents to make calls reliably on iPhone. Phase 10 of the project plan covers the full App Store submission. The web PWA remains the distribution mechanism for Android and desktop users.
+
 ---
 
 ## Frontend Structure
@@ -453,8 +480,9 @@ SENTRY_DSN
 
 | Milestone | Focus |
 |---|---|
-| M1 | Foundation: auth (email/password), data models with LOB + UTM attribution, lead CRUD, pipeline kanban, rank scoring, Twilio call + SMS, mobile-first PWA on Google Cloud |
-| M2 | Policy & quote management, carrier integrations, document uploads, Google/Microsoft OAuth, FCM push notification campaigns |
-| M3 | Analytics dashboard, leaderboard, agent performance views, email notifications |
-| M4 | Automated workflows, AI-assisted follow-up suggestions, native Android/iOS wrappers (Capacitor) |
+| M1 | Foundation: auth, data models (LOB + UTM), lead CRUD, pipeline kanban, rank scoring, Twilio call + SMS, mobile-first PWA on Google Cloud |
+| M1 — Phase 10 | Apple App Store: Capacitor wrapper, Twilio Voice + CallKit, APNs push, Face ID, TestFlight → App Review |
+| M2 | Policy & quote management, carrier integrations, document uploads, Google/Microsoft OAuth |
+| M3 | Analytics dashboard, leaderboard, agent performance views, email notification campaigns |
+| M4 | Automated workflows, AI-assisted follow-up suggestions, Android Play Store distribution |
 | M5 | Public API, webhooks, marketplace integrations (Salesforce, HubSpot sync) |

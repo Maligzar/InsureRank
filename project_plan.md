@@ -25,6 +25,18 @@ Deliver a working, deployable insurance sales CRM core hosted on Google Cloud, o
 
 ## Timeline
 
+### Why the App Store is Required for iPhone
+
+The web PWA works for all InsureRank features on iPhone **except active phone calls**. iOS suspends web pages — and their WebRTC audio — the moment the app is backgrounded or the screen locks. An agent who switches to look up a policy mid-call will have the call drop. This is not a bug that can be fixed in the web layer; it is a fundamental iOS platform constraint.
+
+The solution is App Store distribution via **Capacitor**, which wraps the existing web app in a native iOS shell and adds:
+- **Twilio Programmable Voice + CallKit**: calls continue in the iOS system call UI when the app is backgrounded, exactly like a regular phone call
+- **APNs push**: native push on all iOS 16+ devices, including the lock screen, without requiring "Add to Home Screen"
+- **Face ID login**: faster, more secure access for agents in the field
+- **Standard install**: agents install from the App Store like any other app — no manual "Share → Add to Home Screen" instructions
+
+Phase 10 covers the full App Store submission. Phases 1–9 deliver the working web app; Phase 10 wraps it for the App Store without rewriting any business logic.
+
 | Phase | Focus | Duration |
 |---|---|---|
 | Phase 1 | Project foundation & infrastructure | Week 1 |
@@ -36,8 +48,13 @@ Deliver a working, deployable insurance sales CRM core hosted on Google Cloud, o
 | Phase 7 | Core UI: dashboard, leads, contacts | Week 6–7 |
 | Phase 8 | Twilio call + SMS integration | Week 7–8 |
 | Phase 9 | Testing, QA, and production deployment | Week 8–9.5 |
+| Phase 10 | Apple App Store: Capacitor, CallKit, APNs, Face ID | Week 9.5–12.5 |
 
-Total estimated duration: **9–10 weeks** (1.5 weeks added for Twilio integration)
+Total estimated duration: **12–13 weeks**
+- Phases 1–9: 9.5–10 weeks (web app complete and in production)
+- Phase 10: +3 weeks (iOS native wrapper, App Store submission, Apple review ~1 week wait)
+
+> **Prerequisite for Phase 10:** A Mac with Xcode 15+ and an Apple Developer Program enrollment ($99/year). Phase 10 can begin in parallel with Phase 9's QA work.
 
 ---
 
@@ -506,6 +523,100 @@ Total estimated duration: **9–10 weeks** (1.5 weeks added for Twilio integrati
 
 ---
 
+## Phase 10 — Apple App Store: iOS Native Wrapper
+
+**Goal:** Ship InsureRank on the Apple App Store as a Capacitor hybrid iOS app so that iPhone agents get reliable background calling (CallKit), native push notifications (APNs), Face ID login, and a standard App Store install experience.
+
+**What Capacitor does:** It wraps the existing web app in a native `WKWebView` iOS shell. The web code loads from the production server URL; native plugins bridge JavaScript calls to iOS APIs. No rewrite of business logic or UI is required — only iOS-specific native integrations are added.
+
+### Tasks
+
+#### 10.1 Apple Developer Setup
+- [ ] Enroll in **Apple Developer Program** ($99/year) at developer.apple.com
+- [ ] Create App ID: Bundle ID `com.insurerank.app` in the Apple Developer portal
+- [ ] Create provisioning profiles: development + App Store distribution
+- [ ] Set up **App Store Connect**: new app listing, confirm bundle ID, add support and privacy policy URLs
+- [ ] Publish a Privacy Policy page at `https://[domain]/privacy` (required by App Review)
+
+#### 10.2 Capacitor Project Setup
+- [ ] Install Capacitor in the existing Next.js project:
+  ```
+  npm install @capacitor/core @capacitor/ios @capacitor/cli
+  npx cap init InsureRank com.insurerank.app
+  ```
+- [ ] Configure `capacitor.config.ts`:
+  - `server.url`: production URL (e.g. `https://app.insurerank.com`)
+  - `server.cleartext`: `false` — HTTPS only
+  - `ios.scheme`: `App`
+- [ ] Add iOS platform: `npx cap add ios`
+- [ ] Open Xcode project: `npx cap open ios`
+- [ ] Set **deployment target: iOS 16.0+** in Xcode project settings
+- [ ] Add app icons (1024×1024 App Store + all required sizes) and launch screen matching web brand
+- [ ] Enable Xcode capabilities: **Push Notifications**, **Voice over IP**, **Background Modes** (Audio, Voice over IP)
+
+#### 10.3 Native Twilio Voice + CallKit
+- [ ] Add **Twilio Programmable Voice iOS SDK** to Xcode project via Swift Package Manager
+- [ ] Create a **Capacitor plugin bridge** (`TwilioVoicePlugin`):
+  - TypeScript interface: `makeCall(to, accessToken)`, `hangUp()`, `mute(muted)`, `addListener(event, handler)`
+  - Swift implementation: calls Twilio Voice SDK methods; emits events `callConnected`, `callDisconnected`, `callFailed`, `incomingCall`
+- [ ] Implement **CallKit** in Swift (`CXProvider` + `CXCallController`):
+  - Call shows in iOS native call UI (lock screen, app switcher, Recents)
+  - Audio session continues when app is backgrounded or screen locks
+  - "End" from the iOS call UI correctly terminates the Twilio call
+- [ ] Update web call button: detect `Capacitor.isNativePlatform()` → use `TwilioVoicePlugin.makeCall()` instead of Twilio Client JS WebRTC
+- [ ] Web app listens to `TwilioVoicePlugin` events to update the Activity timeline regardless of which path initiated the call
+
+#### 10.4 Native APNs Push Notifications
+- [ ] Install `@capacitor/push-notifications` plugin
+- [ ] Generate an **APNs Auth Key** (.p8) in Apple Developer portal; upload to Firebase Console so FCM can proxy to APNs
+- [ ] Update client-side push registration: when `Capacitor.isNativePlatform()`, use `PushNotifications.register()` and emit the APNs device token to the server; store in `Agent.apnsToken`
+- [ ] Server-side: when sending push to an iOS agent, use APNs token directly via Firebase Admin SDK (FCM routes to APNs)
+- [ ] Define notification categories in iOS: `NEW_LEAD`, `INBOUND_SMS`, `MISSED_CALL`, `TASK_REMINDER`
+- [ ] Test push delivery on a **physical iPhone** — push cannot be tested in the simulator
+
+#### 10.5 Face ID / Touch ID Login
+- [ ] Install `@capacitor-community/biometric-auth` plugin
+- [ ] After first successful email+password login on a device, prompt: *"Enable Face ID for faster login?"*
+- [ ] On confirmation: encrypt the session token and store it in the **iOS Keychain**
+- [ ] On subsequent app launches: verify with Face ID → decrypt token from Keychain → restore session; skip email+password
+- [ ] Grace period: skip biometric check if app was last active < 5 minutes ago (configurable in org settings)
+- [ ] Fallback: if biometric fails twice, require email + password
+
+#### 10.6 App Store Assets & Metadata
+- [ ] **Screenshots** (required sizes: 6.7" iPhone 15 Pro Max and 6.5" iPhone 14 Plus):
+  - Minimum 3 required; recommended 5–6: Dashboard, Lead Detail with active call UI, Pipeline board, Contacts, Hot Leads widget
+- [ ] Write **App Store description** (max 4000 chars): focus on one-tap calling, real-time rank scores, offline-capable pipeline
+- [ ] Add **keywords** (max 100 chars): insurance CRM, lead management, insurance agent, sales pipeline
+- [ ] Configure **App Privacy nutrition labels** in App Store Connect — declare: name, email, phone number, usage data, device ID
+- [ ] Complete **App Review information** for Apple: demo account credentials and a note explaining the Twilio calling feature
+
+#### 10.7 TestFlight Beta → App Store Submission
+- [ ] Archive and upload build from Xcode → App Store Connect (or via CI below)
+- [ ] Distribute to **TestFlight internal testing** (up to 100 testers, no App Review required)
+- [ ] Run 1-week internal beta: test calls on physical iPhones, push delivery, Face ID, offline mode
+- [ ] Fix any beta issues; upload new build
+- [ ] Submit for **App Review** — Apple typically reviews in 1–3 business days; first submissions sometimes take longer or receive feedback
+- [ ] If rejected: address feedback, re-submit; common first-submission issues are privacy policy gaps or missing data-use disclosures
+- [ ] On approval: set release to **Manual Release** so you control the go-live date
+
+#### 10.8 CI/CD for iOS Builds
+- [ ] Install **Fastlane** in the project
+- [ ] Configure `fastlane match` (certificates stored in a private Git repo) for automatic code signing
+- [ ] Create a `Fastfile` lane:
+  - `ios_beta`: builds archive → uploads to TestFlight
+  - `ios_release`: promotes TestFlight build to App Store
+- [ ] Add GitHub Actions job `ios.yml`: triggers on merge to `main`; runs on `macos-14` runner; calls `fastlane ios_beta`
+- [ ] Store Apple credentials as GitHub Actions secrets: `APPLE_ID`, `APP_STORE_CONNECT_API_KEY`, `MATCH_PASSWORD`, `MATCH_GIT_BASIC_AUTHORIZATION`
+
+**Deliverable:** InsureRank is live on the Apple App Store. Agents install it normally, calls persist in the background via CallKit, push notifications appear on the lock screen on all iOS 16+ devices, and Face ID enables instant login.
+
+**Phase 10 prerequisites:**
+- Mac with Xcode 15+ (GitHub Actions uses a hosted macOS runner; local Mac needed for initial setup)
+- Apple Developer Program enrolled
+- Physical iPhone for push + call testing
+
+---
+
 ## Definition of Done (M1)
 
 An item is done when:
@@ -526,11 +637,14 @@ An item is done when:
 | DB schema changes after data exists in prod | Medium | High | All schema changes via Prisma migrations; never edit prod directly |
 | Cloud Run cold starts (worker service) | Low | Medium | Set min-instances: 1 on the worker service; app service is also always-on |
 | Cloud SQL VPC connectivity | Medium | High | Provision and test VPC Connector in staging before production; Cloud SQL Auth Proxy for local dev |
-| Twilio WebRTC on iOS Safari | Medium | High | Requires iOS 14.5+; call must be triggered by a tap event; test on physical device before launch |
+| Twilio WebRTC call drops on iPhone (PWA) | High | High | **Mitigated by Phase 10**: CallKit + native Twilio Voice SDK keeps calls alive when backgrounded. PWA calling is Android + desktop only. |
+| Apple App Review rejection (Phase 10) | Medium | High | Prepare demo account, complete all privacy labels, publish privacy policy before submission; budget 1–2 re-submission cycles |
 | Twilio webhook delivery failures | Low | Medium | Implement webhook retry queue in BullMQ; log all raw Twilio payloads for replay |
 | Phone number matching for inbound SMS | Medium | Medium | Normalize all phone numbers to E.164 on save; query by normalized number in webhook handler |
-| PWA install prompt blocked by iOS | Medium | Low | iOS Safari does not show native install prompt; provide custom in-app "Add to Home Screen" instructions |
+| PWA install on iOS requires manual steps | High | Low | In Phase 10 this is resolved by App Store install; for Android users keep the custom in-app "Add to Home Screen" prompt |
+| Capacitor plugin API drift | Low | Medium | Pin Capacitor and plugin versions; run `npx cap sync` on every dependency update |
 | Service worker update UX | Low | Low | Show "App updated — reload to apply" banner when a new service worker is waiting |
+| Fastlane code signing complexity | Medium | Medium | Use `fastlane match` with a dedicated private repo; document setup steps in CLAUDE.md |
 
 ---
 
@@ -539,7 +653,8 @@ An item is done when:
 | Decision | Resolution |
 |---|---|
 | Cloud platform | **Google Cloud.** Cloud Run (app + workers), Cloud SQL (PostgreSQL), Memorystore (Redis), GCS (storage), Secret Manager, FCM. |
-| Primary client | **Mobile phone (PWA).** App is installable, offline-capable, and push-enabled. Mobile viewport is the primary design target; desktop is secondary. |
+| Primary client | **iPhone (App Store, Phase 10) and Android (PWA).** Mobile viewport is the primary design target; desktop is secondary. |
+| App Store requirement | **Required for iPhone.** iOS suspends WebRTC audio when the app is backgrounded, dropping active Twilio calls. Capacitor + CallKit (Phase 10) resolves this. PWA remains the distribution channel for Android and desktop. |
 | Lines of business | **In M1.** Support Life, P&C, Health, and Other. `lineOfBusiness` is a required enum on Lead and Policy. |
 | Lead source / attribution | **Full UTM in M1.** Contact stores `sourceChannel` enum + `utmSource`, `utmMedium`, `utmCampaign`, `utmContent`, `utmTerm`. |
 | Authentication providers | **Email + password only for M1.** Google and Microsoft OAuth deferred to M2. |
