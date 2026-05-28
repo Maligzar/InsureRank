@@ -28,25 +28,25 @@ InsureRank is an insurance sales CRM platform built for agencies, brokers, and i
 ### High-Level Diagram
 
 ```
-┌────────────────────────────────────────────────────────────────────┐
-│                          Client Layer                              │
-│   Browser (Next.js)   │   Mobile (React Native - future)          │
-└──────────────┬─────────────────────────────────────────────────────┘
-               │ HTTPS
-┌──────────────▼─────────────────────────────────────────────────────┐
-│                         API Gateway / BFF                          │
-│             Next.js API Routes  (App Router Route Handlers)        │
-└──────┬───────────────┬────────────────────────┬────────────────────┘
-       │               │                        │
-┌──────▼──────┐ ┌──────▼──────┐       ┌────────▼────────┐
-│  Auth       │ │  Core API   │       │  Background     │
-│  (NextAuth) │ │  Services   │       │  Jobs / Workers │
-└──────┬──────┘ └──────┬──────┘       └────────┬────────┘
-       │               │                        │
-┌──────▼───────────────▼────────────────────────▼────────────────────┐
-│                        Data Layer                                  │
-│   PostgreSQL (primary)  │  Redis (cache + sessions)  │  S3 (docs) │
-└────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                           Client Layer                              │
+│  Mobile PWA (primary) — installable, offline-capable, push-enabled │
+│  Desktop browser (secondary)                                        │
+└───────────────────────────┬─────────────────────────────────────────┘
+                            │ HTTPS / WebRTC (Twilio)
+              ┌─────────────▼──────────────────────────────┐
+              │          Google Cloud Run                   │
+              │  ┌─────────────────┐  ┌──────────────────┐ │
+              │  │  Next.js App    │  │  BullMQ Workers  │ │
+              │  │  (SSR + API)    │  │  (rank, notify)  │ │
+              │  └────────┬────────┘  └────────┬─────────┘ │
+              └───────────┼────────────────────┼────────────┘
+                          │ VPC (private)       │
+        ┌─────────────────┼─────────────────────┼──────────────────┐
+        │         Google Cloud — Data Layer      │                  │
+        │  Cloud SQL       │         Memorystore │  Cloud Storage   │
+        │  (PostgreSQL 15) │         (Redis)     │  (GCS bucket)    │
+        └──────────────────┴─────────────────────┴──────────────────┘
 ```
 
 ### Technology Stack
@@ -55,20 +55,24 @@ InsureRank is an insurance sales CRM platform built for agencies, brokers, and i
 |---|---|---|
 | Frontend framework | Next.js 14 (App Router) | SSR, file-based routing, edge-ready |
 | Language | TypeScript (strict) | Type safety across full stack |
-| Styling | Tailwind CSS + shadcn/ui | Rapid, accessible component library |
-| State management | Zustand + React Query | Local UI state + server state caching |
+| Styling | Tailwind CSS + shadcn/ui | Mobile-first, accessible component library |
+| PWA | Serwist (next-pwa successor) | Service worker, offline caching, installability |
+| State management | Zustand + React Query | Local UI state + server state caching with offline support |
 | ORM | Prisma | Type-safe DB access, migration tooling |
-| Database | PostgreSQL 15 | Relational integrity for financial/policy data |
-| Cache / sessions | Redis (Upstash) | Fast session store, rate limiting, job queue |
+| Database | Cloud SQL — PostgreSQL 15 | Managed, private-IP PostgreSQL on GCP |
+| Cache / sessions | Cloud Memorystore (Redis) | Managed Redis in the same GCP VPC |
 | Auth | NextAuth.js v5 | Email + password (M1); OAuth added in M2 |
-| Background jobs | BullMQ (Redis-backed) | Reliable async processing, retries |
-| File storage | AWS S3 | Policy documents, ID uploads |
+| Background jobs | BullMQ (Memorystore-backed) | Reliable async processing, retries |
+| File storage | Google Cloud Storage (GCS) | Policy documents, ID uploads |
 | Email | Resend | Transactional email (quotes, notifications) |
-| Voice + SMS | Twilio | Click-to-call, outbound SMS, activity auto-logging |
-| Deployment | Vercel (frontend) + Railway/Render (workers) | Zero-downtime deploys, preview environments |
-| CI/CD | GitHub Actions | Lint, test, type-check, deploy |
-| Monitoring | Sentry + Vercel Analytics | Error tracking + performance |
-| Testing | Vitest + Playwright | Unit/integration + E2E |
+| Push notifications | Firebase Cloud Messaging (FCM) | Native-quality push to PWA on Android + iOS |
+| Voice + SMS | Twilio | Browser-based calling (WebRTC), outbound SMS, activity auto-logging |
+| Deployment | Google Cloud Run | Containerised Next.js app + workers; auto-scales to zero |
+| Container registry | Google Artifact Registry | Docker image storage |
+| Secrets | Google Secret Manager | Centralised secret storage; injected into Cloud Run at runtime |
+| CI/CD | GitHub Actions | Lint, test, type-check → build Docker image → deploy to Cloud Run |
+| Monitoring | Google Cloud Monitoring + Sentry | Infrastructure metrics + application error tracking |
+| Testing | Vitest + Playwright (mobile viewport) | Unit/integration + E2E with mobile-first test runs |
 
 ---
 
@@ -249,6 +253,26 @@ GET    /api/v1/products
 
 ---
 
+## Mobile-First Design Principles
+
+Because agents primarily use InsureRank on their phones, every UI decision prioritises the mobile experience:
+
+| Principle | Implementation |
+|---|---|
+| Bottom tab navigation | 5 tabs on mobile (Dashboard, Leads, Pipeline, Contacts, Settings) replace a sidebar |
+| Thumb-zone layout | Primary actions (Call, SMS, Add Lead) anchored to the bottom of the screen |
+| Tap target size | Minimum 44 × 44 px for all interactive elements |
+| Offline capability | Leads list, pipeline board, and active lead detail cached by service worker |
+| Swipe gestures | Swipe a lead card left/right on mobile pipeline to move stages |
+| Push notifications | FCM push for: new lead assigned, task due, inbound SMS/call received |
+| One-tap calling | Single button press initiates Twilio browser call — no dialer needed |
+| Fast load | React Query stale-while-revalidate + service worker precaching keeps first paint < 1 s on LTE |
+| Installable | `manifest.json` enables "Add to Home Screen" on Android and iOS |
+
+Desktop retains a sidebar layout; the responsive breakpoint between mobile and desktop is 768 px.
+
+---
+
 ## Frontend Structure
 
 ```
@@ -257,14 +281,14 @@ app/
     login/
     signup/
   (dashboard)/
-    layout.tsx              # Sidebar + header shell
+    layout.tsx              # Adaptive shell: sidebar on ≥768px, bottom nav on mobile
     page.tsx                # Dashboard overview
     leads/
-      page.tsx              # Lead list / table
+      page.tsx              # Lead list (card view on mobile, table on desktop)
       [id]/
-        page.tsx            # Lead detail
+        page.tsx            # Lead detail (full-screen on mobile)
     pipeline/
-      page.tsx              # Kanban board
+      page.tsx              # Kanban board (horizontal scroll on mobile)
     policies/
       page.tsx
       [id]/page.tsx
@@ -283,6 +307,10 @@ app/
 
 components/
   ui/                       # shadcn base components
+  mobile/
+    BottomNav.tsx           # Mobile tab bar
+    SwipeableCard.tsx       # Swipeable lead card for mobile pipeline
+    CallPanel.tsx           # Active call overlay (full-screen on mobile)
   leads/
   pipeline/
   policies/
@@ -292,11 +320,18 @@ components/
 lib/
   db.ts                     # Prisma client singleton
   auth.ts                   # NextAuth config
+  gcs.ts                    # Google Cloud Storage client
+  fcm.ts                    # Firebase Cloud Messaging (server-side)
   rank/
     lead-scorer.ts
     agent-scorer.ts
   validations/              # Zod schemas
   utils.ts
+
+public/
+  manifest.json             # PWA manifest (icons, theme colour, display: standalone)
+  sw.js                     # Service worker (generated by Serwist)
+  icons/                    # PWA icons (192px, 512px, maskable)
 
 prisma/
   schema.prisma
@@ -304,40 +339,79 @@ prisma/
 
 workers/
   rank-worker.ts
-  notification-worker.ts
+  notification-worker.ts    # Sends FCM push notifications
+
+Dockerfile                  # Multi-stage build: deps → builder → runner
+.dockerignore
 ```
 
 ---
 
 ## Infrastructure & Deployment
 
+### Google Cloud Services
+
+| Service | Purpose |
+|---|---|
+| Cloud Run | Hosts the Next.js app container and BullMQ worker container |
+| Cloud SQL (PostgreSQL 15) | Primary relational database; private IP, no public exposure |
+| Cloud Memorystore (Redis) | Session cache, BullMQ job queue, rate-limit counters |
+| Cloud Storage (GCS) | Policy documents, agent ID uploads, org logos |
+| Artifact Registry | Docker image storage (`us-central1-docker.pkg.dev/insurerank/...`) |
+| Secret Manager | All secrets injected into Cloud Run at deploy time — no `.env` in containers |
+| VPC + Serverless VPC Connector | Cloud Run → Cloud SQL + Memorystore on private network |
+| Firebase Cloud Messaging | Push notifications to PWA clients |
+| Cloud Monitoring + Logging | Infrastructure metrics, structured log aggregation |
+| Cloud Armor (M2) | WAF / DDoS protection layer |
+
+### CI/CD Pipeline
+
 ```
 GitHub ──push──► GitHub Actions
                     │
                     ├── lint + typecheck + unit tests
-                    ├── E2E tests (Playwright)
+                    ├── E2E tests — Playwright (mobile viewport: 390×844)
                     └── on merge to main:
-                            ├── Deploy frontend → Vercel
-                            └── Deploy workers  → Railway
+                            ├── docker build (multi-stage)
+                            ├── docker push → Artifact Registry
+                            ├── gcloud run deploy insurerank-app
+                            └── gcloud run deploy insurerank-workers
                                       │
-                            PostgreSQL (Railway managed)
-                            Redis      (Upstash)
-                            S3         (AWS)
+                            Cloud SQL   (PostgreSQL 15, us-central1)
+                            Memorystore (Redis, us-central1)
+                            GCS bucket  (us-central1)
 ```
 
-### Environment Variables
+### GCP Project Structure
 
 ```
-DATABASE_URL
-DIRECT_URL                  # Prisma migrations bypass pooler
-REDIS_URL
+insurerank-prod/
+  Cloud Run services:
+    insurerank-app      (min-instances: 1, max: 10, 512 MB RAM)
+    insurerank-workers  (min-instances: 1, max: 3,  256 MB RAM)
+  Cloud SQL:
+    insurerank-pg       (db-g1-small → db-n1-standard-1 when needed)
+  Memorystore:
+    insurerank-redis    (BASIC tier, 1 GB)
+  GCS:
+    insurerank-documents (private, lifecycle: delete after 7 years)
+```
+
+### Secrets (stored in Secret Manager, mounted as env at runtime)
+
+```
+DATABASE_URL              # postgres://... Cloud SQL private IP
+DIRECT_URL                # Prisma migration bypass (direct Cloud SQL connection)
+REDIS_URL                 # redis://... Memorystore private IP
 NEXTAUTH_SECRET
 NEXTAUTH_URL
-AWS_ACCESS_KEY_ID / SECRET / AWS_S3_BUCKET / AWS_REGION
+GCS_BUCKET_NAME
+GOOGLE_APPLICATION_CREDENTIALS_JSON   # Service account JSON for GCS + FCM
+FIREBASE_SERVER_KEY       # FCM push notifications
 RESEND_API_KEY
 TWILIO_ACCOUNT_SID
 TWILIO_AUTH_TOKEN
-TWILIO_PHONE_NUMBER         # Platform default outbound number
+TWILIO_PHONE_NUMBER
 SENTRY_DSN
 ```
 
@@ -347,24 +421,31 @@ SENTRY_DSN
 
 - All DB queries scoped to `orgId` — no cross-tenant data leakage
 - Prisma parameterized queries prevent SQL injection
-- Rate limiting on auth and mutation endpoints via Redis sliding window
-- File uploads validated server-side (type, size) before S3 pre-signed URL issued
+- Cloud SQL uses private IP only — not reachable from the public internet
+- Rate limiting on auth and mutation endpoints via Memorystore Redis sliding window
+- File uploads validated server-side (type, size) before GCS signed URL issued; GCS bucket is private
 - PII fields (DOB, SSN) encrypted at rest with application-level AES-256
-- HTTPS everywhere; HSTS headers set
+- All secrets stored in Google Secret Manager — never in container images or source code
+- HTTPS everywhere; HSTS headers set; Cloud Run enforces HTTPS by default
 - CSP, X-Frame-Options, and CSRF protection via Next.js middleware
-- Audit log for all data mutations (`Activity` table)
+- Twilio webhook signature validated on every inbound request
+- Service worker scope limited to `/` — no cross-origin script access
+- Audit log for all data mutations (`AuditLog` table)
 - License expiry alerts 30/60/90 days in advance
 
 ---
 
 ## Scalability Considerations
 
-- Prisma connection pooling via PgBouncer (Railway built-in)
-- Redis caches expensive aggregation queries (leaderboard, analytics) with 5-minute TTL
+- Cloud Run auto-scales the app container (0–10 instances); min-instances: 1 avoids cold starts for the app
+- Workers run as a separate Cloud Run service (always-on, 1 minimum instance) to drain the BullMQ queue
+- Prisma connection pooling via `pgbouncer=true` in the connection string (Cloud SQL proxy handles the pool)
+- Memorystore Redis caches expensive aggregation queries (leaderboard, analytics) with 5-minute TTL
 - Rank scoring runs async via BullMQ — never blocks the request path
 - Database indexes on `orgId`, `assignedAgentId`, `pipelineStageId`, `createdAt` for all high-traffic queries
 - Pagination enforced (max 100 rows per request); cursor-based for time-ordered feeds
-- File uploads go directly to S3 via pre-signed URLs — never stream through the app server
+- File uploads go directly to GCS via signed upload URLs — never stream through the app server
+- Service worker caches the static shell and API responses; repeat visits load instantly even on poor mobile connections
 
 ---
 
@@ -372,8 +453,8 @@ SENTRY_DSN
 
 | Milestone | Focus |
 |---|---|
-| M1 | Foundation: auth (email/password), data models with LOB + UTM attribution, lead CRUD, pipeline kanban, rank scoring, Twilio call + SMS |
-| M2 | Policy & quote management, carrier integrations, document uploads, Google/Microsoft OAuth |
+| M1 | Foundation: auth (email/password), data models with LOB + UTM attribution, lead CRUD, pipeline kanban, rank scoring, Twilio call + SMS, mobile-first PWA on Google Cloud |
+| M2 | Policy & quote management, carrier integrations, document uploads, Google/Microsoft OAuth, FCM push notification campaigns |
 | M3 | Analytics dashboard, leaderboard, agent performance views, email notifications |
-| M4 | Automated workflows, AI-assisted follow-up suggestions, mobile web polish |
+| M4 | Automated workflows, AI-assisted follow-up suggestions, native Android/iOS wrappers (Capacitor) |
 | M5 | Public API, webhooks, marketplace integrations (Salesforce, HubSpot sync) |

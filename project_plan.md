@@ -2,7 +2,7 @@
 
 ## Milestone 1 Goal
 
-Deliver a working, deployable insurance sales CRM core: email/password authentication, multi-tenant organization setup, contact/lead management (with line-of-business segmentation and full UTM attribution), a kanban pipeline, lead rank scoring, and Twilio-powered call + SMS from within the app. At the end of M1 an agency can sign up, invite agents, import leads, call or text prospects directly, move leads through a segmented sales funnel, and see each lead's rank score.
+Deliver a working, deployable insurance sales CRM core hosted on Google Cloud, optimised for agents working primarily on their phones. The app is a Progressive Web App (PWA) — installable on Android and iOS, offline-capable, and push-notification-enabled. Features include email/password authentication, multi-tenant organisation setup, contact/lead management (with line-of-business segmentation and full UTM attribution), a mobile-friendly kanban pipeline, lead rank scoring, and Twilio-powered call + SMS from within the app. At the end of M1 an agency can sign up, install the app to their home screen, import leads, call or text prospects with one tap, move leads through a segmented sales funnel, and see each lead's rank score.
 
 ---
 
@@ -10,14 +10,16 @@ Deliver a working, deployable insurance sales CRM core: email/password authentic
 
 - [ ] An organization admin can sign up, configure their agency, and invite team members
 - [ ] Agents can log in with email + password
+- [ ] Agents can install the app to their phone home screen (PWA); the app works offline for cached screens
+- [ ] Agents receive push notifications (FCM) for new lead assignments and task reminders
 - [ ] Agents can create, update, and delete leads and contacts with line-of-business (Life, P&C, Health) and full UTM source attribution
-- [ ] Agents can call or SMS a lead directly from the lead detail page; calls and texts are auto-logged as Activities
-- [ ] Leads can be moved through a configurable pipeline via a kanban board
+- [ ] Agents can call or SMS a lead with one tap from the lead detail page; calls and texts are auto-logged as Activities
+- [ ] Leads can be moved through a configurable pipeline via a mobile-friendly kanban board (swipe on mobile)
 - [ ] Pipeline stages can optionally be filtered by line of business
 - [ ] Each lead displays a rank score (0–100) computed from engagement and pipeline signals
 - [ ] All data is isolated per organization (no cross-tenant leakage)
-- [ ] The application is deployed to production and passes all automated tests
-- [ ] Core pages load in < 2 s on a standard connection
+- [ ] The application is deployed to Google Cloud Run and passes all automated tests
+- [ ] Core pages load in < 2 s on LTE; PWA shell loads in < 1 s on repeat visits
 
 ---
 
@@ -56,22 +58,36 @@ Total estimated duration: **9–10 weeks** (1.5 weeks added for Twilio integrati
 #### 1.2 CI/CD Pipeline
 - [ ] Create GitHub Actions workflow: `ci.yml`
   - Runs on every PR: lint, typecheck (`tsc --noEmit`), unit tests
-  - Runs E2E tests on PRs targeting `main`
+  - Runs E2E tests on PRs targeting `main` (Playwright with mobile viewport 390×844)
 - [ ] Create GitHub Actions workflow: `deploy.yml`
-  - On merge to `main`: deploy to Vercel (preview on PR, production on merge)
+  - On merge to `main`: build Docker image → push to Artifact Registry → `gcloud run deploy`
+  - Use Workload Identity Federation (no long-lived service account keys in CI)
 - [ ] Configure branch protection on `main` (require CI green + 1 review)
 
-#### 1.3 Infrastructure Provisioning
-- [ ] Provision Railway project with PostgreSQL 15 instance
-- [ ] Provision Upstash Redis instance (free tier for dev)
-- [ ] Create AWS S3 bucket with appropriate IAM policy (upload + read-only public for docs)
-- [ ] Configure Vercel project linked to GitHub repo with env vars
-- [ ] Set up Sentry project and add DSN to env
+#### 1.3 Google Cloud Infrastructure Provisioning
+- [ ] Create GCP project `insurerank-prod` (and `insurerank-staging` for preview deploys)
+- [ ] Enable APIs: Cloud Run, Cloud SQL, Memorystore, Cloud Storage, Artifact Registry, Secret Manager, Firebase, Cloud Build
+- [ ] Provision **Cloud SQL** — PostgreSQL 15, `db-g1-small`, private IP, `us-central1`
+  - Enable Cloud SQL Auth Proxy for local dev connections
+- [ ] Provision **Memorystore** — Redis 7, BASIC tier, 1 GB, `us-central1`, private IP
+- [ ] Create **Serverless VPC Connector** so Cloud Run can reach Cloud SQL and Memorystore on the private network
+- [ ] Create **GCS bucket** `insurerank-documents` — private, `us-central1`, lifecycle rule: delete after 7 years
+- [ ] Create **Artifact Registry** repository `insurerank` in `us-central1`
+- [ ] Create a **dedicated service account** for the Cloud Run app with least-privilege IAM roles:
+  - `roles/cloudsql.client`, `roles/storage.objectAdmin`, `roles/secretmanager.secretAccessor`
+- [ ] Set up Sentry project and store DSN in Secret Manager
+- [ ] Enable **Firebase** project linked to GCP project (for FCM)
 
-#### 1.4 Environment Configuration
-- [ ] Create `.env.example` documenting all required variables
-- [ ] Add all secrets to GitHub Actions secrets and Vercel environment variables
-- [ ] Add `.env.local` setup instructions to `README.md`
+#### 1.4 Secrets & Environment Configuration
+- [ ] Store all secrets in **Google Secret Manager** (not `.env` files in containers):
+  - `DATABASE_URL`, `DIRECT_URL`, `REDIS_URL`, `NEXTAUTH_SECRET`, `NEXTAUTH_URL`
+  - `GCS_BUCKET_NAME`, `GOOGLE_APPLICATION_CREDENTIALS_JSON`
+  - `FIREBASE_SERVER_KEY`, `RESEND_API_KEY`
+  - `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER`
+  - `SENTRY_DSN`
+- [ ] Create `.env.example` documenting all variables for local dev
+- [ ] Add `.env.local` setup instructions (using Cloud SQL Auth Proxy for local DB) to `README.md`
+- [ ] Add GitHub Actions secrets: `GCP_PROJECT_ID`, `GCP_WORKLOAD_IDENTITY_PROVIDER`, `GCP_SERVICE_ACCOUNT`
 
 #### 1.5 Dependency Installation
 - [ ] Install and verify core dependencies:
@@ -80,15 +96,19 @@ Total estimated duration: **9–10 weeks** (1.5 weeks added for Twilio integrati
   - `zod`
   - `@tanstack/react-query`
   - `zustand`
-  - `ioredis` (or `@upstash/redis`)
+  - `ioredis`
   - `bullmq`
   - `resend`
-  - `@aws-sdk/client-s3`
+  - `@google-cloud/storage`         ← GCS (replaces @aws-sdk/client-s3)
+  - `firebase-admin`                 ← FCM push notifications (server side)
+  - `serwist` + `@serwist/next`      ← PWA / service worker
   - `twilio`
   - `@sentry/nextjs`
   - `tailwindcss`, `shadcn-ui`
+- [ ] Write `Dockerfile` (multi-stage: `deps` → `builder` → `runner`) and `.dockerignore`
+- [ ] Verify `docker build` + `docker run` works locally before wiring CI
 
-**Deliverable:** `npm run dev` starts with no errors; `npm run lint` and `npm test` pass in CI.
+**Deliverable:** `npm run dev` starts with no errors; `npm run lint` and `npm test` pass; Docker image builds cleanly.
 
 ---
 
@@ -245,13 +265,14 @@ Total estimated duration: **9–10 weeks** (1.5 weeks added for Twilio integrati
 - [ ] `GET /api/v1/pipeline/board` — returns all stages with their leads (summarized), counts, and total expected revenue per stage; supports `assignedAgentId` and `lineOfBusiness` filters
 
 #### 5.3 Kanban Board UI
-- [ ] Implement draggable kanban using `@dnd-kit/core` + `@dnd-kit/sortable`
+- [ ] **Desktop:** drag-and-drop kanban using `@dnd-kit/core` + `@dnd-kit/sortable`
+- [ ] **Mobile:** horizontally scrollable columns; long-press a card → stage picker bottom sheet (swipe-to-dismiss); no drag required
 - [ ] Column per pipeline stage showing:
   - Stage name, lead count, total expected revenue
   - Lead cards: contact name, rank score badge, temperature indicator, assigned agent avatar, expected close date
-- [ ] Drag a card between columns → optimistic UI update → `PATCH /api/v1/leads/:id/stage`
-- [ ] Click a card → open lead detail slide-over panel (not full navigation)
-- [ ] Column header "Add Lead" button → quick-create form inline
+- [ ] Move a card to a new stage → optimistic UI update → `PATCH /api/v1/leads/:id/stage`
+- [ ] Tap a card → navigate to full lead detail (mobile) or open slide-over panel (desktop)
+- [ ] Column header "Add Lead" button → quick-create bottom sheet (mobile) or inline form (desktop)
 
 #### 5.4 Pipeline Settings UI
 - [ ] Settings → Pipeline page
@@ -286,7 +307,7 @@ Total estimated duration: **9–10 weeks** (1.5 weeks added for Twilio integrati
   - Job: `score-lead` — calls `lead-scorer.ts`, writes `RankSnapshot`, updates `Lead.rankScore`
   - Concurrency: 5 parallel jobs
   - Retry: 3 attempts with exponential backoff
-- [ ] Worker entry point registered as a separate Railway service
+- [ ] Worker entry point deployed as a separate **Cloud Run service** (`insurerank-workers`) with min-instances: 1
 
 #### 6.3 Job Dispatch
 - [ ] Create `src/lib/rank/enqueue.ts` — `enqueuLeadScoring(leadId)` helper
@@ -309,19 +330,32 @@ Total estimated duration: **9–10 weeks** (1.5 weeks added for Twilio integrati
 
 ---
 
-## Phase 7 — Core UI
+## Phase 7 — Core UI (Mobile-First PWA)
 
-**Goal:** A polished, navigable application shell and all M1 screens.
+**Goal:** A polished, installable PWA with all M1 screens designed for phone-first use.
 
 ### Tasks
 
+#### 7.0 PWA Foundation
+- [ ] Configure Serwist in `next.config.ts` — generate service worker at build time
+- [ ] Write `public/manifest.json`:
+  - `display: "standalone"`, `orientation: "portrait"`
+  - Short name: "InsureRank", theme colour matching brand
+  - Icon set: 192 px, 512 px, maskable variant
+- [ ] Service worker caching strategy:
+  - `StaleWhileRevalidate` for API routes (leads list, pipeline board)
+  - `CacheFirst` for static assets (JS, CSS, fonts, icons)
+  - `NetworkFirst` for lead detail (must be fresh; fall back to cache when offline)
+- [ ] Offline fallback page (`/offline`) shown when a non-cached route is requested without network
+- [ ] "Add to Home Screen" prompt: show once after 3rd session; dismissible
+- [ ] FCM push setup (client side): request notification permission on first login; save FCM token to `Agent.fcmToken` field
+- [ ] Test install flow on Android Chrome and iOS Safari 16+
+
 #### 7.1 Application Shell
-- [ ] Sidebar navigation (collapsible on mobile):
-  - Dashboard, Leads, Pipeline, Contacts, Analytics (disabled in M1), Settings
-  - Organization switcher (future: multi-org agents)
-  - User menu: profile, sign out
-- [ ] Top header: page title, global search bar (placeholder for M2), notification bell placeholder
-- [ ] Responsive layout (sidebar collapses to bottom nav on mobile)
+- [ ] **Mobile (< 768 px):** fixed bottom tab bar with 5 tabs: Dashboard, Leads, Pipeline, Contacts, Settings
+- [ ] **Desktop (≥ 768 px):** collapsible left sidebar with same 5 items + Analytics (disabled in M1)
+- [ ] Top header: page title only on mobile (no search bar); search + notification bell on desktop
+- [ ] User menu (avatar → profile, sign out) — placed in bottom tab bar on mobile
 - [ ] Theme: light mode only for M1 (dark mode in M2)
 
 #### 7.2 Dashboard Page (`/dashboard`)
@@ -331,20 +365,23 @@ Total estimated duration: **9–10 weeks** (1.5 weeks added for Twilio integrati
 - [ ] Recent activity feed: last 10 activities across the org
 
 #### 7.3 Leads List Page (`/dashboard/leads`)
-- [ ] Data table with columns: Contact, LOB, Rank Score, Stage, Temperature, Assigned Agent, Expected Revenue, Last Activity, Close Date
-- [ ] Sortable columns, server-side pagination
+- [ ] **Mobile:** scrollable card list (contact name, LOB badge, rank score, temperature chip, last activity); tap card → detail
+- [ ] **Desktop:** data table with columns: Contact, LOB, Rank Score, Stage, Temperature, Assigned Agent, Expected Revenue, Last Activity, Close Date
+- [ ] Sortable columns (desktop), server-side pagination with infinite scroll (mobile)
 - [ ] Filter panel: stage, agent, line of business, source channel, temperature, date range
-- [ ] Bulk action toolbar (select all → assign / move stage)
-- [ ] "New Lead" button → slide-over form
-- [ ] CSV import button → file picker + preview + import
+- [ ] Bulk action toolbar (select → assign / move stage) — desktop only in M1
+- [ ] "New Lead" FAB (floating action button) on mobile; button in header on desktop → slide-over form
+- [ ] CSV import — desktop only in M1
 
 #### 7.4 Lead Detail Page (`/dashboard/leads/:id`)
+- [ ] Full-screen on mobile (no slide-over); slide-over panel on desktop for kanban drill-through
+- [ ] **Sticky action bar at bottom of screen on mobile:** Call button (green), SMS button (blue), Log Note button — always reachable with thumb
 - [ ] Contact information card (editable inline) — includes source channel and UTM attribution (read-only display)
-- [ ] Pipeline stage selector (horizontal stage rail)
+- [ ] Pipeline stage selector (horizontal scrollable stage rail)
 - [ ] Rank score panel: badge + component breakdown + sparkline
 - [ ] Activity timeline (chronological, newest first) — call entries show duration, direction, and recording playback link
 - [ ] Log activity form: email, meeting, note, task (calls and SMS use Twilio buttons, not this form)
-- [ ] Sidebar: assigned agent, line of business badge, temperature selector, expected revenue, close date, tags
+- [ ] Info sidebar: assigned agent, line of business badge, temperature selector, expected revenue, close date, tags (collapses to accordion on mobile)
 
 #### 7.5 Contacts List Page (`/dashboard/contacts`)
 - [ ] Table: name, email, phone, assigned agent, open leads count, created date
@@ -354,7 +391,7 @@ Total estimated duration: **9–10 weeks** (1.5 weeks added for Twilio integrati
 #### 7.6 Settings Pages
 - [ ] Settings → Team: list agents, invite, change role, deactivate
 - [ ] Settings → Pipeline: drag-to-reorder stages, add/edit/archive
-- [ ] Settings → Organization: name, logo upload (S3), timezone
+- [ ] Settings → Organization: name, logo upload (GCS signed URL), timezone
 - [ ] Settings → Account: change name, email, password
 
 #### 7.7 Empty States & Error Handling
@@ -391,11 +428,17 @@ Total estimated duration: **9–10 weeks** (1.5 weeks added for Twilio integrati
 - [ ] Validate `X-Twilio-Signature` header on all webhook endpoints using `twilio.validateRequest()` — reject unsigned requests with 403
 
 #### 8.5 Call UI in Lead Detail
-- [ ] "Call" button on lead detail page — initiates browser call via Twilio Client JS SDK
-- [ ] Active call panel: contact name, timer, mute/hang-up controls
-- [ ] "SMS" button — opens inline compose box; character count; send button
+- [ ] "Call" button in sticky bottom action bar — initiates browser call via Twilio Client JS SDK (WebRTC)
+- [ ] Active call panel (full-screen overlay on mobile): contact name, call timer, mute, speaker, hang-up
+- [ ] "SMS" button — opens full-screen compose view on mobile; character count; send button
+- [ ] iOS Safari requires a user gesture to start audio — the tap on "Call" serves as the gesture; no additional prompt needed
+- [ ] Test on Android Chrome 120+ and iOS Safari 16.4+ before sign-off
 
-#### 8.6 Twilio Number per Agent (Optional M1 stretch)
+#### 8.6 FCM Push for Inbound SMS/Call Missed
+- [ ] When an inbound SMS arrives (Twilio webhook) and the agent's PWA is in the background, send an FCM push notification: "New message from [Contact Name]: [first 60 chars]"
+- [ ] When a Twilio call status = `no-answer` or `busy`, push: "Missed call from [Contact Name]"
+
+#### 8.7 Twilio Number per Agent (Optional M1 stretch)
 - [ ] Allow agents to have a dedicated Twilio number (stored on Agent record) for outbound caller ID; fall back to platform default if not set
 
 **Deliverable:** Agents can call and text a lead with one click; every call and SMS appears automatically in the lead's activity timeline with duration and direction.
@@ -418,14 +461,17 @@ Total estimated duration: **9–10 weeks** (1.5 weeks added for Twilio integrati
 - [ ] Integration tests for critical flows using Prisma test client against a test database
 
 #### 9.2 E2E Tests (Playwright)
+- [ ] All E2E suites run in two configurations: **mobile viewport (390×844, touch)** and **desktop (1440×900)**
 - [ ] Sign up new organization → onboarding wizard → land on dashboard
-- [ ] Create contact with LOB + UTM attribution → convert to lead → move through pipeline stages
+- [ ] Install PWA (mobile): verify manifest served, "Add to Home Screen" prompt appears after 3rd session
+- [ ] Create contact with LOB + UTM attribution → convert to lead → move through pipeline stages (mobile: bottom sheet stage picker; desktop: drag-and-drop)
 - [ ] Filter pipeline kanban by line of business
 - [ ] Log activity → verify rank score updates
 - [ ] Invite agent → agent accepts → agent logs in → sees only own leads
 - [ ] CSV import → verify leads appear in pipeline with correct LOB and source channel
 - [ ] Simulate Twilio call status webhook → verify CALL Activity auto-created on lead
 - [ ] Simulate Twilio inbound SMS webhook → verify SMS Activity created and `lastActivityAt` updated
+- [ ] Verify FCM token saved after notification permission granted on login
 
 #### 9.3 Security Audit
 - [ ] Verify all mutations require valid session (run tests with no session header)
@@ -436,21 +482,24 @@ Total estimated duration: **9–10 weeks** (1.5 weeks added for Twilio integrati
 
 #### 9.4 Performance Baseline
 - [ ] Run Lighthouse CI against `/dashboard`, `/dashboard/leads`, `/dashboard/pipeline`
-- [ ] Target: LCP < 2.5 s, TBT < 200 ms on desktop; LCP < 4 s on mobile
+- [ ] Targets — **mobile (throttled LTE):** LCP < 2.5 s, TBT < 300 ms, PWA score 100
+- [ ] Targets — **desktop:** LCP < 1.5 s, TBT < 150 ms
+- [ ] Verify service worker caches the app shell; repeat visit PWA load < 1 s
 - [ ] Add missing DB indexes if query explain plans show sequential scans
 
 #### 9.5 Production Deployment
-- [ ] Run `prisma migrate deploy` against production DB
-- [ ] Run `prisma db seed` for demo org data (optional — only if onboarding demo mode desired)
-- [ ] Verify all environment variables are set in Vercel and Railway (including Twilio vars)
-- [ ] Configure Twilio webhook URLs to point at production domain
-- [ ] Smoke test production: register, log in, create lead with LOB, move through pipeline, place a test call
-- [ ] Configure Sentry alerts for error rate > 1% and p95 latency > 3 s
-- [ ] Set up Upstash Redis production instance with persistence enabled
+- [ ] Run `prisma migrate deploy` against Cloud SQL production DB (via Cloud SQL Auth Proxy from CI)
+- [ ] Run `prisma db seed` for demo org data (optional)
+- [ ] Verify all secrets are set in Google Secret Manager and mounted in Cloud Run service revision
+- [ ] Configure Twilio webhook URLs to point at the production Cloud Run URL
+- [ ] Confirm Cloud Run VPC Connector reaches Memorystore and Cloud SQL on private IPs
+- [ ] Smoke test production on a physical phone: install PWA, register, log in, create lead, place a test call
+- [ ] Configure Google Cloud Monitoring alerts: error rate > 1%, p95 latency > 3 s, Cloud SQL CPU > 80%
+- [ ] Verify FCM push notifications delivered on both Android and iOS
 
 #### 9.6 Documentation
-- [ ] Update `README.md` with: local dev setup, env vars, ngrok Twilio tunnel setup, seed instructions, deploy instructions
-- [ ] Write `CLAUDE.md` with: project conventions, key file locations, test commands, architecture summary (for AI-assisted development sessions)
+- [ ] Update `README.md` with: local dev setup (Cloud SQL Auth Proxy), ngrok Twilio tunnel setup, Docker build, seed instructions, deploy instructions
+- [ ] Write `CLAUDE.md` with: project conventions, key file locations, test commands, GCP service map, architecture summary
 - [ ] Postman/Bruno collection exported for all v1 API endpoints
 
 **Deliverable:** All CI checks green; production URL live; no P0 bugs in smoke test; Sentry reporting 0 errors.
@@ -475,10 +524,13 @@ An item is done when:
 | NextAuth v5 API instability (beta) | Medium | High | Pin exact version; watch changelog; have fallback to v4 |
 | Rank scoring adds perceptible latency | Low | Medium | Scoring is always async via BullMQ — never in request path |
 | DB schema changes after data exists in prod | Medium | High | All schema changes via Prisma migrations; never edit prod directly |
-| Drag-and-drop library accessibility issues | Medium | Low | Use `@dnd-kit` which has keyboard support; add ARIA labels |
-| Railway/Vercel cold starts impacting p95 | Low | Medium | Keep API routes lightweight; warm critical routes with health check pings |
+| Cloud Run cold starts (worker service) | Low | Medium | Set min-instances: 1 on the worker service; app service is also always-on |
+| Cloud SQL VPC connectivity | Medium | High | Provision and test VPC Connector in staging before production; Cloud SQL Auth Proxy for local dev |
+| Twilio WebRTC on iOS Safari | Medium | High | Requires iOS 14.5+; call must be triggered by a tap event; test on physical device before launch |
 | Twilio webhook delivery failures | Low | Medium | Implement webhook retry queue in BullMQ; log all raw Twilio payloads for replay |
 | Phone number matching for inbound SMS | Medium | Medium | Normalize all phone numbers to E.164 on save; query by normalized number in webhook handler |
+| PWA install prompt blocked by iOS | Medium | Low | iOS Safari does not show native install prompt; provide custom in-app "Add to Home Screen" instructions |
+| Service worker update UX | Low | Low | Show "App updated — reload to apply" banner when a new service worker is waiting |
 
 ---
 
@@ -486,8 +538,10 @@ An item is done when:
 
 | Decision | Resolution |
 |---|---|
+| Cloud platform | **Google Cloud.** Cloud Run (app + workers), Cloud SQL (PostgreSQL), Memorystore (Redis), GCS (storage), Secret Manager, FCM. |
+| Primary client | **Mobile phone (PWA).** App is installable, offline-capable, and push-enabled. Mobile viewport is the primary design target; desktop is secondary. |
 | Lines of business | **In M1.** Support Life, P&C, Health, and Other. `lineOfBusiness` is a required enum on Lead and Policy. |
 | Lead source / attribution | **Full UTM in M1.** Contact stores `sourceChannel` enum + `utmSource`, `utmMedium`, `utmCampaign`, `utmContent`, `utmTerm`. |
 | Authentication providers | **Email + password only for M1.** Google and Microsoft OAuth deferred to M2. |
-| Phone / SMS integration | **Twilio Call + SMS in M1** — full browser-based calling and SMS with auto-logged Activities. Timeline extended by 1.5 weeks. |
-| Data residency / compliance | **No special requirements.** Standard AWS `us-east-1`; HTTPS + AES-256 encryption at rest is sufficient. |
+| Phone / SMS integration | **Twilio Call + SMS in M1** — browser-based WebRTC calling and SMS with auto-logged Activities and FCM push for missed events. Timeline extended by 1.5 weeks. |
+| Data residency / compliance | **No special requirements.** GCP `us-central1`; HTTPS + AES-256 encryption at rest is sufficient. |
