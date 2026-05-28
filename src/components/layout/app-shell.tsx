@@ -4,13 +4,14 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { cn } from '@/lib/utils'
 import type { ReactNode } from 'react'
-import { LayoutDashboard, Users, Briefcase, KanbanSquare, Settings } from 'lucide-react'
+import { LayoutDashboard, Users, Briefcase, KanbanSquare, Upload, Settings } from 'lucide-react'
 
 const navItems = [
   { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
   { href: '/leads', label: 'Leads', icon: Briefcase },
   { href: '/contacts', label: 'Contacts', icon: Users },
   { href: '/pipeline', label: 'Pipeline', icon: KanbanSquare },
+  { href: '/imports', label: 'Import', icon: Upload },
   { href: '/settings', label: 'Settings', icon: Settings },
 ]
 
