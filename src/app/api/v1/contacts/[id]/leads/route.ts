@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { requireSession } from '@/lib/api-auth'
 import { leadSchema } from '@/lib/validations'
+import { enqueueLeadRank } from '@/lib/queue'
 
 type Ctx = { params: Promise<{ id: string }> }
 
@@ -63,6 +64,9 @@ export async function POST(req: Request, { params }: Ctx) {
       },
       include: { pipelineStage: true },
     })
+
+    // Fire-and-forget — score the new lead immediately
+    enqueueLeadRank(lead.id).catch(console.error)
 
     return NextResponse.json(lead, { status: 201 })
   } catch (err: unknown) {

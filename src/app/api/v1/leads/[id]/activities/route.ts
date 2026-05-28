@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { requireSession } from '@/lib/api-auth'
 import { activitySchema } from '@/lib/validations'
+import { enqueueLeadRank } from '@/lib/queue'
 
 type Ctx = { params: Promise<{ id: string }> }
 
@@ -66,6 +67,7 @@ export async function POST(req: Request, { params }: Ctx) {
     })
 
     await db.lead.update({ where: { id }, data: { lastActivityAt: new Date() } })
+    enqueueLeadRank(id).catch(console.error)
 
     return NextResponse.json(activity, { status: 201 })
   } catch (err: unknown) {

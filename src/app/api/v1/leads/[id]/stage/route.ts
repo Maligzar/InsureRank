@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { requireSession } from '@/lib/api-auth'
 import { leadStageSchema } from '@/lib/validations'
+import { enqueueLeadRank } from '@/lib/queue'
 
 type Ctx = { params: Promise<{ id: string }> }
 
@@ -34,6 +35,7 @@ export async function PATCH(req: Request, { params }: Ctx) {
       include: { pipelineStage: true },
     })
 
+    enqueueLeadRank(id).catch(console.error)
     return NextResponse.json(updated)
   } catch (err: unknown) {
     if (err instanceof Error && 'status' in err) {
