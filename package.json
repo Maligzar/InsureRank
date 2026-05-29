@@ -91,6 +91,9 @@
     "typescript": "^5",
     "vitest": "^4.1.7"
   },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
   "lint-staged": {
     "*.{ts,tsx}": [
       "eslint --fix",
