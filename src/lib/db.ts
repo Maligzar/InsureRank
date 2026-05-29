@@ -3,15 +3,14 @@ import { execSync } from 'child_process'
 
 const globalForPrisma = globalThis as unknown as { prisma: PrismaClient | undefined }
 
-// Build a guaranteed-correct URL using the OS username as fallback
+// Build a guaranteed-correct URL — skip placeholder URLs from .env.example
 function getDatabaseUrl(): string {
   const envUrl = process.env.DATABASE_URL
-  console.log('[db] DATABASE_URL from env:', envUrl)
-  if (envUrl) return envUrl
+  if (envUrl && !envUrl.includes('postgres:password')) return envUrl
   const user = execSync('whoami').toString().trim()
-  const fallback = `postgresql://${user}@127.0.0.1:5432/insurerank`
-  console.log('[db] Using fallback URL:', fallback)
-  return fallback
+  const url = `postgresql://${user}@127.0.0.1:5432/insurerank`
+  console.log('[db] Using local URL for user:', user)
+  return url
 }
 
 export const db =
