@@ -25,6 +25,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
       },
       async authorize(credentials) {
         const parsed = credentialsSchema.safeParse(credentials)
+        console.log('[auth] parsed ok:', parsed.success, parsed.error?.issues)
         if (!parsed.success) return null
 
         const { email, password } = parsed.data
@@ -34,9 +35,11 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
           include: { agent: true },
         })
 
+        console.log('[auth] user found:', !!user, 'hasHash:', !!user?.passwordHash)
         if (!user || !user.passwordHash) return null
 
         const valid = await compare(password, user.passwordHash)
+        console.log('[auth] password valid:', valid)
         if (!valid) return null
 
         return {
