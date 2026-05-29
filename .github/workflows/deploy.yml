@@ -1,0 +1,102 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  GCP_REGION: us-central1
+  ARTIFACT_REGISTRY: us-central1-docker.pkg.dev
+  GCP_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+  IMAGE_APP: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/insurerank/app
+  IMAGE_WORKERS: us-central1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/insurerank/workers
+  SERVICE_APP: insurerank-app
+  SERVICE_WORKERS: insurerank-workers
+
+jobs:
+  build-push:
+    name: Build & Push Images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write  # Workload Identity Federation
+    outputs:
+      image-tag: ${{ steps.meta.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - run: gcloud auth configure-docker ${{ env.ARTIFACT_REGISTRY }}
+
+      - id: meta
+        run: echo "sha=${GITHUB_SHA::8}" >> $GITHUB_OUTPUT
+
+      - name: Build & push app image
+        run: |
+          docker build \
+            --tag ${{ env.IMAGE_APP }}:${{ steps.meta.outputs.sha }} \
+            --tag ${{ env.IMAGE_APP }}:latest \
+            --cache-from ${{ env.IMAGE_APP }}:latest \
+            --build-arg BUILDKIT_INLINE_CACHE=1 \
+            .
+          docker push ${{ env.IMAGE_APP }}:${{ steps.meta.outputs.sha }}
+          docker push ${{ env.IMAGE_APP }}:latest
+
+      - name: Build & push workers image
+        run: |
+          docker build \
+            --file workers/Dockerfile \
+            --tag ${{ env.IMAGE_WORKERS }}:${{ steps.meta.outputs.sha }} \
+            --tag ${{ env.IMAGE_WORKERS }}:latest \
+            .
+          docker push ${{ env.IMAGE_WORKERS }}:${{ steps.meta.outputs.sha }}
+          docker push ${{ env.IMAGE_WORKERS }}:latest
+
+  deploy:
+    name: Deploy to Cloud Run
+    runs-on: ubuntu-latest
+    needs: build-push
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Run DB migrations
+        run: |
+          gcloud run jobs execute insurerank-migrate \
+            --region ${{ env.GCP_REGION }} \
+            --wait
+
+      - name: Deploy app
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.SERVICE_APP }}
+          image: ${{ env.IMAGE_APP }}:${{ needs.build-push.outputs.image-tag }}
+          region: ${{ env.GCP_REGION }}
+
+      - name: Deploy workers
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.SERVICE_WORKERS }}
+          image: ${{ env.IMAGE_WORKERS }}:${{ needs.build-push.outputs.image-tag }}
+          region: ${{ env.GCP_REGION }}
